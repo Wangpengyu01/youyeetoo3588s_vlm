@@ -87,28 +87,65 @@ def drain_complete_sentences(buffer: str, *, min_flush_chars: int = 22) -> tuple
     return out, rest
 
 
-_BAD_REPLY = re.compile(r"人工智能|以下是|我可以帮助您|助手，可以")
+_BAD_REPLY = re.compile(r"人工智能|以下是|我可以帮助|助手|没有名字|小AI|有什么需要|帮忙的吗")
 _CAPABILITY = re.compile(r"做什么|会什么|能干|帮我什么")
+_NAME = re.compile(r"叫什么|名字|你是谁|哪位")
+_GREET = re.compile(r"^你好[呀啊]?$|早上好|晚上好")
 
 
 def is_robotic_reply(text: str) -> bool:
     return bool(_BAD_REPLY.search(text))
 
 
-def canned_reply_for(user_text: str) -> str | None:
+def persona_reply_for(user_text: str) -> str:
+    """Deterministic voice reply when LLM ignores system prompt."""
+    if _NAME.search(user_text):
+        return "我叫小揽，是你这边的语音助手。"
     if _CAPABILITY.search(user_text):
         return "我能跟你聊天，还能帮你看情况。"
+    if _GREET.search(user_text.strip()):
+        return "你好呀，我是小揽。"
+    return "我是小揽，你的语音助手。"
+
+
+def canned_reply_for(user_text: str) -> str | None:
+    if _NAME.search(user_text):
+        return "我叫小揽，是你这边的语音助手。"
+    if _CAPABILITY.search(user_text):
+        return "我能跟你聊天，还能帮你看情况。"
+    if _GREET.search(user_text.strip()):
+        return "你好呀，我是小揽。"
     return None
 
 
 def pick_first_sentence(text: str) -> str:
-    m = _PRIMARY.search(text)
-    if m:
+    sents = extract_speak_sentences(text, max_cjk=9999)
+    return sents[0] if sents else ""
+
+
+def extract_speak_sentences(text: str, max_cjk: int) -> list[str]:
+    """All complete sentences within a CJK character budget."""
+    if max_cjk <= 0:
+        return []
+    out: list[str] = []
+    used = 0
+    for m in _PRIMARY.finditer(text):
         sent = sanitize_tts_text(m.group(1))
-        if is_speakable(sent):
-            return sent
-    sent = sanitize_tts_text(text)
-    return sent if is_speakable(sent) else ""
+        if not is_speakable(sent):
+            continue
+        n = count_cjk(sent)
+        if used + n > max_cjk:
+            tail = cap_speak_text(sent, max_cjk - used)
+            if tail:
+                out.append(tail)
+            break
+        out.append(sent)
+        used += n
+    if not out:
+        one = cap_speak_text(text, max_cjk)
+        if one:
+            out.append(one)
+    return out
 
 
 def flush_remainder(buffer: str) -> list[str]:

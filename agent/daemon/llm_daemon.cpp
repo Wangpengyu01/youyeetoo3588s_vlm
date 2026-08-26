@@ -326,6 +326,24 @@ static int init_daemon(const char *model_path, const char *weight_path, const ch
   if (ret != RKNN3_SUCCESS)
     return ret;
 
+  // Phase G-b (optional): enable InternVL ChatML so system_prompt is honored.
+  // See agent/docs/BUILD_LINUX.md §9 — uncomment after editing template strings.
+#if 0
+  {
+    const char *system_prompt =
+        "<|im_start|>system\n你是 youyeetoo R1 语音助手小揽，只用简体中文简短回答。\n";
+    const char *prompt_prefix = "<|im_start|>user\n";
+    const char *prompt_postfix = "\n<|im_start|>assistant\n";
+    ret = rknn3_session_set_chat_template(g_session, system_prompt, prompt_prefix, prompt_postfix);
+    if (ret != RKNN3_SUCCESS)
+    {
+      fprintf(stderr, "[daemon] set_chat_template failed ret=%d\n", ret);
+      return -1;
+    }
+    fprintf(stderr, "[daemon] chat template enabled (InternVL ChatML)\n");
+  }
+#endif
+
   if (max_context_len != llm_config.max_ctx_len && max_context_len > llm_config.max_ctx_len)
     return -1;
 

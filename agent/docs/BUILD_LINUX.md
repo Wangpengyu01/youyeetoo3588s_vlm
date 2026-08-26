@@ -132,3 +132,102 @@ export RKNN3_API_PATH=~/project/RK182X/rknn/rknn3-api   # 与 session_test_demo 
 grep -n rknn3_llm_config ${RKNN3_API_PATH}/include/rknn3_api.h
 make clean && make llm_daemon
 ```
+
+---
+
+## 9. 何时必须重编 llm_daemon · Phase G-b（chat template）
+
+> **当前仓库状态（2026-08-26）**  
+> - Python 编排层（`orchestrator`）已把 `agent.yaml` 的 `system_prompt` **拼进每轮 prompt 字符串**发给 daemon。  
+> - `agent/daemon/llm_daemon.cpp` **尚未**调用 `rknn3_session_set_chat_template`，模型常忽略「小揽」等人设。  
+> - 应用层已用 `persona_reply_for()` 兜底；**要让提示词真正生效，必须重编 daemon 并启用 chat template**（Phase G-b）。
+
+### 9.1 必须重编的情况
+
+| 场景 | 是否重编 |
+|------|----------|
+| 只改 Python / yaml / 语音脚本 | **否** — `push_agent.ps1` 即可 |
+| 修改了 `agent/daemon/llm_daemon.cpp` | **是** |
+| 要启用 InternVL ChatML template（推荐） | **是** |
+| 板端日志 `size=184, expect=408` | **是** — 换对齐的 `rknn3-api` 头文件后重编 |
+| 仓库里的 `agent/bin/llm_daemon` 与 VM 新编产物不一致 | **是** — 以 VM 编译产物为准 push |
+
+### 9.2 源码改动要点（你在 VM 里做）
+
+在 `init_daemon()` 里、`rknn3_session_set_kvcache_policy` **之后**增加（token 名以 GGUF 为准，InternVL3.5 一般为 ChatML）：
+
+```cpp
+  // Phase G-b: InternVL ChatML — system 留空，由 orchestrator 每轮 prompt 携带规则（或后续 IPC 注入）
+  {
+    const char *system_prompt =
+        "<|im_start|>system\n你是 youyeetoo R1 语音助手小揽，只用简体中文简短回答。\n";
+    const char *prompt_prefix = "<|im_start|>user\n";
+    const char *prompt_postfix = "\n<|im_start|>assistant\n";
+    ret = rknn3_session_set_chat_template(g_session, system_prompt, prompt_prefix, prompt_postfix);
+    if (ret != RKNN3_SUCCESS) {
+      fprintf(stderr, "[daemon] set_chat_template failed ret=%d\n", ret);
+      return -1;
+    }
+    fprintf(stderr, "[daemon] chat template enabled (InternVL ChatML)\n");
+  }
+```
+
+> 若 `set_chat_template` 返回非 0，在板子或 PC 上对 tokenizer 查真实模板：  
+> `python3 read_gguf.py /userdata/models/InternVL3_5-4B/InternVL3_5-4B.tokenizer.gguf`  
+> 把 `im_start` / `im_end` 特殊 token 与上面对齐（SDK 示例里写作 `<|im_end|>` 处应对应 ``）。
+
+启用 template 后，orchestrator 侧 **建议** 只发用户 ASR 文本（不再重复拼 system）；当前版本仍发合并 prompt 也能跑，但可能双重 system — Phase G-b 后续可改 `orchestrator/main.py` 的 `_run_llm()`。
+
+### 9.3 重编与部署（完整流程）
+
+```bash
+# ── 1. PC：拉最新代码 ──
+git pull origin main
+
+# ── 2. PC → VM：同步 daemon 源码 ──
+scp agent/daemon/llm_daemon.cpp \
+  gp@192.168.100.196:~/r1-sdk/rknn/rknn3-runtime/examples/rknn3_session_test_demo/src/
+
+# ── 3. VM Docker 内编译（flags 与 rknn3_session_test 完全一致）──
+ssh gp@192.168.100.196
+cd ~/r1-sdk/rknn/rknn3-runtime/examples/rknn3_session_test_demo
+export RKNN3_API_PATH=~/project/RK182X/rknn/rknn3-api   # 与板端 session_test 同版本
+make clean && make llm_daemon
+file llm_daemon    # 必须是 ELF 64-bit ARM aarch64
+
+# ── 4. VM → PC（或直接 adb push）──
+# scp gp@192.168.100.196:.../llm_daemon  ./agent/bin/llm_daemon
+
+# ── 5. PC → 板端 ──
+adb push agent/bin/llm_daemon /userdata/agent/bin/llm_daemon
+adb shell chmod +x /userdata/agent/bin/llm_daemon
+
+# ── 6. 板端：重启 daemon + orchestrator ──
+adb shell bash -c '
+  pkill -f llm_daemon || true
+  pkill -f orchestrator.main || true
+  rm -f /tmp/r1-llm.sock /userdata/agent/run/*.pid
+  bash /userdata/agent/scripts/start_llm_daemon.sh
+  bash /userdata/agent/scripts/start_orchestrator.sh
+'
+```
+
+### 9.4 验收（重编后）
+
+```bash
+# 日志应出现 chat template enabled
+adb shell tail -30 /userdata/agent/logs/llm_daemon.log
+
+# 问「你叫什么名字」— 应优先回答「小揽」，而不是「人工智能助手」
+adb shell tail -f /userdata/agent/logs/orchestrator.log
+# 期望：LLM 正文含「小揽」；若仍机器人腔，persona fallback 仍会兜底
+```
+
+| 判据 | 通过 |
+|------|------|
+| daemon 启动 | log 含 `[daemon] chat template enabled` |
+| socket | `/tmp/r1-llm.sock` 存在 |
+| 人设 | 问名字 → 口播含「小揽」（LLM 或 fallback） |
+| 性能 | 首 token 仍 < 500ms（daemon 已热） |
+
+**不需要重编 llm_daemon 时**：仅 Python/yaml 变更 → `powershell -File agent/scripts/push_agent.ps1` + 重启 orchestrator 即可。

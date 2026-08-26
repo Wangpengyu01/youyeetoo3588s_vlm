@@ -27,8 +27,9 @@ from tts.sentence_split import (
     cap_speak_text,
     count_cjk,
     drain_complete_sentences,
+    extract_speak_sentences,
     is_robotic_reply,
-    pick_first_sentence,
+    persona_reply_for,
 )
 from tts.tts_engine import TtsConfig, TtsEngine
 from tts.tts_queue import TtsQueue
@@ -56,7 +57,6 @@ class Orchestrator:
         self._turn_busy = False
         self._speaking = False
         self._tts_abort = False
-        self._spoken_cjk = 0
 
         vad_cfg = cfg.get("vad") or {}
         asr_cfg = cfg.get("asr") or {}
@@ -138,7 +138,6 @@ class Orchestrator:
         self.socket_path = cfg.get("socket_path", "/tmp/r1-llm.sock")
         self.max_new_tokens = int(cfg.get("max_new_tokens", 64))
         self.max_speak_chars = int(tts_cfg.get("max_speak_chars", 100))
-        self.tts_max_sentences = int(tts_cfg.get("max_sentences", 2))
         self.system_prompt = (cfg.get("system_prompt") or "").strip()
         self.vad_stream = VadStream(self.vad_config, self.vad_queue)
         self.tts_queue = TtsQueue(
@@ -164,7 +163,6 @@ class Orchestrator:
             ),
             merge_max_chars=int(tts_cfg.get("merge_max_chars", 40)),
         )
-        self.tts_queue.set_max_sentences(self.tts_max_sentences)
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def emit(self, event: dict[str, Any]) -> None:
@@ -208,13 +206,6 @@ class Orchestrator:
         self._listen_cooldown_until = 0.0
         await self.tts_queue.interrupt()
         await self.emit({"type": "barge_in", "phase": "tts"})
-
-    def _cap_for_tts(self, text: str) -> str:
-        remaining = self.max_speak_chars - self._spoken_cjk
-        capped = cap_speak_text(text, remaining)
-        if capped:
-            self._spoken_cjk += count_cjk(capped)
-        return capped
 
     async def run_vad_loop(self, inject_wav: str | None = None) -> None:
         try:
@@ -275,7 +266,6 @@ class Orchestrator:
     async def _process_turn(self, event: dict[str, Any]) -> None:
         self._turn_busy = True
         self._tts_abort = False
-        self._spoken_cjk = 0
         self.tts_queue.mark_utterance_start()
         duration = event.get("duration_sec", 0.0)
         LOG.info("[event] audio_segment %.2fs", duration)
@@ -299,29 +289,49 @@ class Orchestrator:
             self._turn_busy = False
             self.set_state(AgentState.LISTEN)
 
+    async def _enqueue_speak(self, text: str, tts_state: dict[str, int | bool]) -> bool:
+        if self._tts_abort:
+            return False
+        remaining = self.max_speak_chars - int(tts_state["cjk"])
+        speak = cap_speak_text(text, remaining)
+        if not speak:
+            return False
+        tts_state["n"] = int(tts_state["n"]) + 1
+        tts_state["cjk"] = int(tts_state["cjk"]) + count_cjk(speak)
+        LOG.info("[event] tts_sentence: %s", speak[:60])
+        await self.emit({"type": "tts_sentence", "text": speak})
+        await self.tts_queue.enqueue(speak)
+        return True
+
     async def _run_llm(self, prompt: str) -> None:
         user_prompt = prompt
         self.set_state(AgentState.LLM)
         await asyncio.to_thread(llm_clear_history, self.socket_path)
         if self.system_prompt:
             prompt = f"{self.system_prompt}\n\n用户：{prompt}\n小揽："
+        LOG.info("[llm] prompt %d chars · user=%s", len(prompt), user_prompt[:48])
         buffer = {"text": ""}
-        tts_state = {"n": 0, "cjk": 0}
+        turn_tainted = {"v": False}
+        tts_state: dict[str, int | bool] = {"n": 0, "cjk": 0, "canned": False}
         loop = asyncio.get_running_loop()
 
         def _enqueue_tts(sent: str) -> None:
-            if self._tts_abort or tts_state["n"] >= self.tts_max_sentences:
+            if self._tts_abort or turn_tainted["v"] or int(tts_state["cjk"]) >= self.max_speak_chars:
                 return
             speak = sent
             if is_robotic_reply(speak):
-                speak = canned_reply_for(user_prompt) or ""
+                canned = canned_reply_for(user_prompt)
+                if not canned:
+                    turn_tainted["v"] = True
+                    return
+                speak = canned
+                tts_state["canned"] = True
+            remaining = self.max_speak_chars - int(tts_state["cjk"])
+            speak = cap_speak_text(speak, remaining)
             if not speak:
                 return
-            speak = cap_speak_text(speak, self.max_speak_chars - tts_state["cjk"])
-            if not speak:
-                return
-            tts_state["n"] += 1
-            tts_state["cjk"] += count_cjk(speak)
+            tts_state["n"] = int(tts_state["n"]) + 1
+            tts_state["cjk"] = int(tts_state["cjk"]) + count_cjk(speak)
             LOG.info("[event] tts_sentence: %s", speak[:60])
             asyncio.run_coroutine_threadsafe(
                 self.emit({"type": "tts_sentence", "text": speak}),
@@ -333,14 +343,18 @@ class Orchestrator:
             if self._tts_abort:
                 return
             buffer["text"] += piece
+            if is_robotic_reply(buffer["text"]):
+                turn_tainted["v"] = True
             asyncio.run_coroutine_threadsafe(
                 self.emit({"type": "llm_token", "text": piece}),
                 loop,
             )
+            if turn_tainted["v"]:
+                return
             complete, buffer["text"] = drain_complete_sentences(buffer["text"])
             for sent in complete:
                 _enqueue_tts(sent)
-                if tts_state["n"] >= self.tts_max_sentences or tts_state["cjk"] >= self.max_speak_chars:
+                if int(tts_state["cjk"]) >= self.max_speak_chars:
                     break
 
         try:
@@ -352,38 +366,25 @@ class Orchestrator:
                 max_new_tokens=self.max_new_tokens,
             )
             full = reply["text"]
-            if tts_state["n"] == 0 and not self._tts_abort:
-                sent = pick_first_sentence(full)
-                if sent and not is_robotic_reply(sent):
-                    sent = self._cap_for_tts(sent)
-                    if sent:
-                        await self.emit({"type": "tts_sentence", "text": sent})
-                        await self.tts_queue.enqueue(sent)
-                        tts_state["n"] += 1
-                        tts_state["cjk"] += count_cjk(sent)
-                elif canned := canned_reply_for(user_prompt):
-                    canned = self._cap_for_tts(canned)
-                    if canned:
-                        await self.emit({"type": "tts_sentence", "text": canned})
-                        await self.tts_queue.enqueue(canned)
-                        tts_state["n"] += 1
-                        tts_state["cjk"] += count_cjk(canned)
-            elif is_robotic_reply(full) and not self._tts_abort:
-                canned = canned_reply_for(user_prompt)
-                if canned:
-                    canned = self._cap_for_tts(canned)
-                    if canned:
-                        await self.tts_queue.discard_pending()
-                        await self.emit({"type": "tts_sentence", "text": canned})
-                        await self.tts_queue.enqueue(canned)
-                        tts_state["n"] += 1
+            if not self._tts_abort and (turn_tainted["v"] or is_robotic_reply(full)):
+                await self.tts_queue.discard_pending()
+                tts_state = {"n": 0, "cjk": 0, "canned": True}
+                speak = persona_reply_for(user_prompt)
+                LOG.info("[llm] persona fallback: %s", speak[:48])
+                await self._enqueue_speak(speak, tts_state)
+            elif int(tts_state["n"]) == 0 and not self._tts_abort:
+                for sent in extract_speak_sentences(full, self.max_speak_chars):
+                    if not await self._enqueue_speak(sent, tts_state):
+                        break
+                    if int(tts_state["cjk"]) >= self.max_speak_chars:
+                        break
             LOG.info(
                 "[llm] reply (%d chars, ttft=%.3fs): %s",
                 len(full),
                 reply.get("ttft_s") or 0,
                 full[:120],
             )
-            if tts_state["n"] > 0 and not self._tts_abort:
+            if int(tts_state["n"]) > 0 and not self._tts_abort:
                 self.set_state(AgentState.TTS)
                 self._speaking = True
                 try:
