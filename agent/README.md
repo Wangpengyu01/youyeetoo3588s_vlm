@@ -2,7 +2,7 @@
 
 youyeetoo R1（RK3588S）+ RM1828（RK1828）端侧对话智能体。
 
-**当前阶段：** Phase A–D ✅ · 下一步 Phase E（agent_api WebSocket）
+**当前阶段：** Phase A–E ✅ · v1 语音对话闭环完成
 
 ## 与现有代码的关系
 

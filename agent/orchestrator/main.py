@@ -1,4 +1,4 @@
-"""Asyncio orchestrator — Phase D: VAD → ASR → LLM stream → TTS queue."""
+"""Asyncio orchestrator — Phase E: voice pipeline + WebSocket event API."""
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +11,8 @@ _AGENT_ROOT = Path(__file__).resolve().parent.parent
 if str(_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(_AGENT_ROOT))
 
+from api.event_bus import EventBus
+from api.ws_server import run_ws_server
 from asr.asr_engine import AsrEngine, AsrEngineConfig
 from asr.sense_voice import SenseVoiceConfig
 from asr.vad_stream import VadConfig, VadStream
@@ -44,7 +46,13 @@ class Orchestrator:
         vad_cfg = cfg.get("vad") or {}
         asr_cfg = cfg.get("asr") or {}
         tts_cfg = cfg.get("tts") or {}
+        api_cfg = cfg.get("api") or {}
         paths = cfg.get("paths") or {}
+
+        self.event_bus = EventBus()
+        self.api_enabled = str(api_cfg.get("enabled", "true")).lower() not in ("0", "false", "no")
+        self.api_host = str(api_cfg.get("host", "127.0.0.1"))
+        self.api_port = int(api_cfg.get("port", 8765))
 
         self.vad_config = VadConfig(
             model_path=vad_cfg.get("model", "/userdata/voice/silero_vad.onnx"),
@@ -113,10 +121,14 @@ class Orchestrator:
         )
         self._loop: asyncio.AbstractEventLoop | None = None
 
+    async def emit(self, event: dict[str, Any]) -> None:
+        await self.event_bus.publish(event)
+
     def set_state(self, new: AgentState) -> None:
         if new != self.state:
             LOG.info("[state] %s -> %s", self.state.value, new.value)
             self.state = new
+            asyncio.create_task(self.emit({"type": "state", "value": new.value}))
 
     def ping_llm_daemon(self) -> bool:
         if not Path(self.socket_path).exists():
@@ -133,9 +145,11 @@ class Orchestrator:
     def _new_asr_session(self):
         async def on_partial(text: str) -> None:
             LOG.info("[event] asr_partial: %s", text)
+            await self.emit({"type": "asr_partial", "text": text})
 
         async def on_final(text: str, meta: dict) -> None:
             LOG.info("[event] asr_final: %s", text or meta.get("status"))
+            await self.emit({"type": "asr_final", "text": text, "meta": meta})
 
         self._asr_session = self.asr_engine.create_session(on_partial, on_final)
         return self._asr_session
@@ -202,9 +216,17 @@ class Orchestrator:
 
         def on_token(piece: str) -> None:
             buffer["text"] += piece
+            asyncio.run_coroutine_threadsafe(
+                self.emit({"type": "llm_token", "text": piece}),
+                loop,
+            )
             complete, buffer["text"] = drain_complete_sentences(buffer["text"])
             for sent in complete:
                 LOG.info("[event] tts_sentence: %s", sent[:60])
+                asyncio.run_coroutine_threadsafe(
+                    self.emit({"type": "tts_sentence", "text": sent}),
+                    loop,
+                )
                 asyncio.run_coroutine_threadsafe(self.tts_queue.enqueue(sent), loop)
 
         try:
@@ -217,6 +239,7 @@ class Orchestrator:
             )
             for sent in flush_remainder(buffer["text"]):
                 LOG.info("[event] tts_sentence: %s", sent[:60])
+                await self.emit({"type": "tts_sentence", "text": sent})
                 await self.tts_queue.enqueue(sent)
             LOG.info(
                 "[llm] reply (%d chars, ttft=%.3fs): %s",
@@ -238,13 +261,15 @@ class Orchestrator:
         self.set_state(AgentState.IDLE)
         self.ping_llm_daemon()
         await self.tts_queue.start()
+        if self.api_enabled:
+            await run_ws_server(self.event_bus, self.api_host, self.api_port)
         await asyncio.gather(self.run_vad_loop(inject_wav), self.handle_events())
 
 
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="R1 agent orchestrator (Phase D)")
+    parser = argparse.ArgumentParser(description="R1 agent orchestrator (Phase E)")
     parser.add_argument("--config", default="/userdata/agent/config/agent.yaml")
     parser.add_argument("--agent-root", default="/userdata/agent")
     parser.add_argument("--inject-wav", help="offline test: feed wav instead of mic")
@@ -259,7 +284,7 @@ def main() -> None:
 
     cfg = load_yaml(args.config)
     setup_logging(args.log_level)
-    LOG.info("=== R1 orchestrator Phase D ===")
+    LOG.info("=== R1 orchestrator Phase E ===")
     orch = Orchestrator(cfg, agent_root)
     if args.no_partial or args.inject_wav:
         orch.asr_engine.cfg.partial_enabled = False
