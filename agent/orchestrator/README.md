@@ -4,26 +4,23 @@
 
 状态：`IDLE → LISTEN → ASR → LLM → TTS → LISTEN`
 
-## Phase C（当前）
+## Phase D（当前）
 
-- **VAD**：sherpa Silero + 常开 mic
-- **ASR**：SenseVoice · `asr_partial` / `asr_final` 事件
-- **LLM**：识别完成后自动调 `llm_daemon`
-- **TTS**：stub（Phase D）
+- **VAD** + **ASR** + **LLM 流式** + **分句 TTS 队列**
+- LLM token 流 → 按句号/逗号分句 → VITS-melo 合成 → `play_wav.sh`
 
 ## 板端
 
 ```bash
-bash /userdata/agent/scripts/start_orchestrator.sh
+bash /userdata/agent/scripts/agent_chat.sh
 tail -f /userdata/agent/logs/orchestrator.log
 
-bash /userdata/agent/scripts/phase_c_test.sh
+bash /userdata/agent/scripts/phase_d_test.sh
 ```
-
-实时模式下对着板载麦说话，日志可见 partial（最多 3 次/句）和 final。
 
 ## 离线调试
 
 ```bash
 python3 -m orchestrator.main --inject-wav /path/to/16k.wav --no-partial
+python3 -m orchestrator.main --inject-wav /path/to/16k.wav --no-tts
 ```
