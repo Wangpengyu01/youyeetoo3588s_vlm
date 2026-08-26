@@ -93,13 +93,51 @@ def drain_complete_sentences(buffer: str, *, min_flush_chars: int = 22) -> tuple
 _BAD_REPLY = re.compile(
     r"人工智能|以下是|我可以帮助|助手|没有名字|小AI|有什么需要|帮忙的吗"
     r"|爱因斯坦|广义相对论|自然界|深度学习|Transformer|以下方法|如果您能提供|乐意帮助"
+    r"|乐意为你讲述|感兴趣的主题|请告诉我你.*需求|创作一个简短"
 )
 _CAPABILITY = re.compile(r"做什么|会什么|能干|帮我什么|都会做")
-_STORY = re.compile(r"故事|哄我|睡前|讲个笑话|讲个故事|讲讲话|讲个话")
+_STORY = re.compile(r"故事|哄我|睡前|讲个笑话|讲个故事|讲讲话|讲个话|笑话")
 _NAME = re.compile(r"叫什么|名字|你是谁|哪位")
+_RECITE = re.compile(r"背诵|元素周期|周期表|乘法表|九九表")
 _GREET = re.compile(r"^你好[呀啊]?$|早上好|晚上好")
 _STOP = re.compile(r"^(不再|停|停止|别说了|不要说了|闭嘴|算了)[了]?$")
+_INTRO_PREFIX = re.compile(r"^(?:我叫小揽|我是小揽)[，,。\s]*")
+_NAME_ONLY = re.compile(r"^(?:我叫小揽|我是小揽)[。！？]?$")
 _SCIENCE_LECTURE = re.compile(r"引力是|基本力|时空弯曲|训练数据|超参数")
+_STORY_FALLBACKS = (
+    "好呀，小狐狸在夜里找星星，走累了靠着月亮睡了。风轻轻吹，它梦见彩虹。晚安，好梦。",
+    "从前有只小兔子，每天傍晚都在窗台等晚霞。有一天晚霞落在它耳朵上，变成了一朵温暖的花。",
+    "夜里，小猫抱着月亮的倒影睡着了，梦里它在一整片星星上跳来跳去。",
+)
+
+
+def _story_fallback(user_text: str) -> str:
+    idx = sum(ord(c) for c in user_text) % len(_STORY_FALLBACKS)
+    return _STORY_FALLBACKS[idx]
+
+
+def user_asked_name(user_text: str) -> bool:
+    return bool(_NAME.search(user_text))
+
+
+def clean_llm_reply(user_text: str, reply: str) -> str:
+    """Strip spurious self-intro when user did not ask for name."""
+    text = (reply or "").strip()
+    text = re.sub(r"^小揽[：:]\s*", "", text)
+    if not user_asked_name(user_text):
+        text = _INTRO_PREFIX.sub("", text).strip()
+    if not user_asked_name(user_text) and _NAME_ONLY.match(sanitize_tts_text(text)):
+        return ""
+    return text.strip()
+
+
+def is_spurious_name_reply(user_text: str, reply: str) -> bool:
+    if user_asked_name(user_text):
+        return False
+    clean = sanitize_tts_text(clean_llm_reply(user_text, reply))
+    if not clean:
+        return True
+    return len(_CJK.findall(clean)) <= 8 and bool(re.search(r"叫小揽|是小揽", clean))
 
 
 def is_robotic_reply(text: str) -> bool:
@@ -107,7 +145,13 @@ def is_robotic_reply(text: str) -> bool:
 
 
 def is_off_topic_reply(user_text: str, reply: str) -> bool:
-    """User asked persona/capability but LLM lectured on something else."""
+    """User asked persona/capability/story but LLM lectured or deflected."""
+    if is_spurious_name_reply(user_text, reply):
+        return True
+    if _STORY.search(user_text) and _BAD_REPLY.search(reply):
+        return True
+    if _RECITE.search(user_text) and _NAME_ONLY.match(sanitize_tts_text(clean_llm_reply(user_text, reply))):
+        return True
     if not (_CAPABILITY.search(user_text) or _NAME.search(user_text) or _GREET.search(user_text.strip())):
         return False
     return bool(_SCIENCE_LECTURE.search(reply) or is_robotic_reply(reply))
@@ -122,11 +166,9 @@ def persona_reply_for(user_text: str) -> str:
     if _CAPABILITY.search(user_text):
         return "我能跟你聊天，还能帮你看情况。"
     if _STORY.search(user_text):
-        return (
-            "好呀，小狐狸在夜里找星星，走累了靠着月亮睡了。"
-            "风轻轻吹，它梦见彩虹。"
-            "晚安，好梦。"
-        )
+        return _story_fallback(user_text)
+    if _RECITE.search(user_text):
+        return "元素周期表太长了，我没法完整背完。前几个是氢、氦、锂、铍、硼、碳、氮、氧、氟、氖。"
     if _GREET.search(user_text.strip()):
         return "你好呀，我是小揽。"
     return "我是小揽，你的语音助手。"
@@ -139,12 +181,6 @@ def canned_reply_for(user_text: str) -> str | None:
         return "我叫小揽，是你这边的语音助手。"
     if _CAPABILITY.search(user_text):
         return "我能跟你聊天，还能帮你看情况。"
-    if _STORY.search(user_text):
-        return (
-            "好呀，小狐狸在夜里找星星，走累了靠着月亮睡了。"
-            "风轻轻吹，它梦见彩虹。"
-            "晚安，好梦。"
-        )
     if _GREET.search(user_text.strip()):
         return "你好呀，我是小揽。"
     return None
@@ -182,7 +218,8 @@ def extract_speak_sentences(text: str, max_cjk: int = 99999) -> list[str]:
         out.append(sent)
         used += n
     rest = sanitize_tts_text(text[consumed:])
-    if is_speakable(rest):
+    # Drop LLM-truncated tail without 。！？ — avoids mid-sentence fragments.
+    if is_speakable(rest) and re.search(r"[。！？!?]$", rest):
         if uncapped:
             out.append(rest)
         elif used + count_cjk(rest) <= max_cjk:

@@ -36,6 +36,7 @@ echo "[start] llm_daemon pid=$(cat "${PIDFILE}") log=${LOG} sock=${SOCK}"
 
 for _ in $(seq 1 60); do
   if [[ -S "${SOCK}" ]]; then
+    chmod 777 "${SOCK}" 2>/dev/null || true
     echo "[start] socket ready"
     exit 0
   fi

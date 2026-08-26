@@ -6,7 +6,7 @@ import re
 _DUP_CHAR = re.compile(r"(.)\1{1,}")
 _DUP_GREET = re.compile(r"^(你好[呀啊]?)+")
 _PURE_GREET = re.compile(r"^你好[呀啊]?$")
-_NAME_FIX = re.compile(r"小懒|小兰|小蓝|影力")
+_NAME_FIX = re.compile(r"小懒|小兰|小蓝|小榄|影力")
 _GREETING_NAME = re.compile(r"^(?:你好|电好)?小揽[，,、\s]*", re.IGNORECASE)
 # Streaming ASR 常见误识：小揽→引力、你都→引力都；句首噪声「因不在」等
 _GRAVITY_FIX = re.compile(r"引力都")
@@ -27,6 +27,9 @@ def normalize_user_text(text: str) -> str:
     text = re.sub(r"(?i)^so好", "你好", text)
     text = re.sub(r"讲讲话", "讲个笑话", text)
     text = re.sub(r"给我讲话", "给我讲个笑话", text)
+    text = re.sub(r"讲个故$", "讲个故事", text)
+    text = re.sub(r"^党故事", "讲个故事", text)
+    text = re.sub(r"来我睡觉", "哄我睡觉", text)
     # 短问候 + ASR 幻听后缀（如「你好…你叫什么名字」）→ 只保留问候
     if _PURE_GREET.match(text) or (
         text.startswith("你好") and len(text) <= 4 and "叫什么" not in text

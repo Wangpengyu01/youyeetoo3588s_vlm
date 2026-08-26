@@ -1,0 +1,31 @@
+[Unit]
+Description=R1 InternVL LLM daemon (RM1828)
+After=rknn3.service rknn-mdns.service network-online.target
+Wants=rknn3.service network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=AGENT_ROOT=/userdata/agent
+Environment=LLM_MODEL_DIR=/userdata/models/InternVL3_5-4B
+Environment=LD_LIBRARY_PATH=/usr/lib
+WorkingDirectory=/userdata/agent
+ExecStartPre=/bin/mkdir -p /userdata/agent/logs /userdata/agent/run
+ExecStartPre=/bin/bash /userdata/agent/scripts/wait_rknn.sh 45
+ExecStartPre=/bin/rm -f /tmp/r1-llm.sock
+ExecStart=/userdata/agent/bin/llm_daemon \
+  /userdata/models/InternVL3_5-4B/llm_InternVL3_5-4B.rknn \
+  /userdata/models/InternVL3_5-4B/llm_InternVL3_5-4B.weight \
+  /userdata/models/InternVL3_5-4B/InternVL3_5-4B.tokenizer.gguf \
+  /userdata/models/InternVL3_5-4B/InternVL3_5-4B.embed.bin \
+  1024 64 0xff
+StandardOutput=append:/userdata/agent/logs/llm_daemon.log
+StandardError=append:/userdata/agent/logs/llm_daemon.log
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=180
+ExecStartPost=/bin/bash /userdata/agent/scripts/fix_llm_sock_perms.sh /tmp/r1-llm.sock 60
+
+[Install]
+WantedBy=multi-user.target

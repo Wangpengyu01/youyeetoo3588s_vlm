@@ -461,6 +461,7 @@ static int serve_forever()
     close(srv);
     return -1;
   }
+  chmod(g_sock_path, 0777);
   if (listen(srv, 4) < 0)
   {
     close(srv);

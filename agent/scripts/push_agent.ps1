@@ -8,7 +8,7 @@ $Board = "/userdata/agent"
 
 Write-Host "[push] $Root\agent -> $Board"
 
-adb shell "mkdir -p $Board/bin $Board/scripts $Board/config $Board/logs $Board/run $Board/asr $Board/orchestrator"
+adb shell "mkdir -p $Board/bin $Board/scripts $Board/config $Board/logs $Board/run $Board/asr $Board/orchestrator $Board/ui $Board/systemd"
 
 function Push-Lf($Local, $Remote) {
     $content = [System.IO.File]::ReadAllText($Local).Replace("`r`n", "`n")
@@ -43,6 +43,16 @@ Get-ChildItem "$Root\agent\scripts" -Filter "*.sh" | ForEach-Object {
 }
 Push-Lf "$Root\agent\config\agent.yaml" "$Board/config/agent.yaml"
 
+Get-ChildItem "$Root\agent\ui" -File | ForEach-Object {
+    Push-Lf $_.FullName "$Board/ui/$($_.Name)"
+}
+Get-ChildItem "$Root\agent\systemd" -Filter "*.service" | ForEach-Object {
+    Push-Lf $_.FullName "$Board/systemd/$($_.Name)"
+}
+Get-ChildItem "$Root\agent\scripts" -Filter "*.desktop" | ForEach-Object {
+    Push-Lf $_.FullName "$Board/scripts/$($_.Name)"
+}
+
 adb shell "chmod +x $Board/scripts/*.sh 2>/dev/null; chmod +x $Board/bin/* 2>/dev/null; ls -la $Board/scripts/"
 
 if (Test-Path "$Root\agent\bin\llm_daemon") {
@@ -60,3 +70,4 @@ Write-Host "  Phase C: adb shell bash $Board/scripts/phase_c_test.sh"
 Write-Host "  Phase D: adb shell bash $Board/scripts/phase_d_test.sh"
 Write-Host "  Phase E: adb shell bash $Board/scripts/phase_e_test.sh"
 Write-Host "  WS probe: adb shell python3 $Board/scripts/ws_probe.py"
+Write-Host "  Autostart: adb shell sudo bash $Board/scripts/install_autostart.sh"

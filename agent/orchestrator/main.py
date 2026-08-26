@@ -24,9 +24,11 @@ from orchestrator.config_loader import load_yaml
 from orchestrator.events import AgentState
 from tts.sentence_split import (
     canned_reply_for,
+    clean_llm_reply,
     extract_speak_sentences,
     is_off_topic_reply,
     is_robotic_reply,
+    is_spurious_name_reply,
     is_speakable,
     persona_reply_for,
     sanitize_tts_text,
@@ -381,10 +383,12 @@ class Orchestrator:
                 sock_path=self.socket_path,
                 max_new_tokens=self.max_new_tokens,
             )
-            full = reply["text"]
+            full = clean_llm_reply(user_prompt, reply["text"])
             need_fallback = (
-                turn_tainted["v"]
+                not full.strip()
+                or turn_tainted["v"]
                 or is_robotic_reply(full)
+                or is_spurious_name_reply(user_prompt, full)
                 or is_off_topic_reply(user_prompt, full)
             )
             if not self._tts_abort and need_fallback:

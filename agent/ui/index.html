@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>小揽 · 语音助手</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --accent: #3d8bfd;
+      --ok: #3dd68c;
+      --warn: #ffb020;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+    }
+    body {
+      font-family: "Cantarell", "Noto Sans CJK SC", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      flex: 0 0 auto;
+      padding: 0.9rem 1.2rem;
+      background: linear-gradient(135deg, #1e3a5f, #0f1419);
+      border-bottom: 1px solid #243044;
+    }
+    h1 { margin: 0; font-size: 1.45rem; font-weight: 600; }
+    .sub { color: var(--muted); margin-top: 0.25rem; font-size: 0.88rem; }
+    main {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 0.8rem 1.2rem 1rem;
+      overflow: hidden;
+    }
+    .status-row {
+      flex: 0 0 auto;
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 0.6rem;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.35rem 0.75rem;
+      border-radius: 999px;
+      background: var(--card);
+      font-size: 0.88rem;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+    .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+    .dot.busy { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+    .state-big {
+      flex: 0 0 auto;
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      margin: 0 0 0.6rem;
+      color: var(--accent);
+    }
+    .cards {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+      overflow: hidden;
+    }
+    .card {
+      flex: 1 1 0;
+      min-height: 0;
+      background: var(--card);
+      border-radius: 12px;
+      padding: 0.75rem 0.95rem;
+      border: 1px solid #243044;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .card h2 {
+      flex: 0 0 auto;
+      margin: 0 0 0.45rem;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    .card p {
+      flex: 1 1 auto;
+      margin: 0;
+      line-height: 1.45;
+      font-size: 1.05rem;
+      word-break: break-word;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 6;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>小揽 · 语音助手</h1>
+    <div class="sub">对着麦克风说话即可</div>
+  </header>
+  <main>
+    <div class="status-row">
+      <span class="pill"><span id="wsDot" class="dot"></span><span id="wsLabel">连接中…</span></span>
+      <span class="pill"><span id="svcDot" class="dot"></span><span id="svcLabel">服务检测中…</span></span>
+    </div>
+    <div id="state" class="state-big">—</div>
+    <div class="cards">
+      <div class="card">
+        <h2>你说</h2>
+        <p id="asr">（等待语音输入）</p>
+      </div>
+      <div class="card">
+        <h2>小揽</h2>
+        <p id="reply">（等待回复）</p>
+      </div>
+      <div class="card">
+        <h2>正在播放</h2>
+        <p id="tts">—</p>
+      </div>
+    </div>
+  </main>
+  <script>
+    const WS_URL = "ws://127.0.0.1:8765/ws";
+    const stateEl = document.getElementById("state");
+    const asrEl = document.getElementById("asr");
+    const replyEl = document.getElementById("reply");
+    const ttsEl = document.getElementById("tts");
+    const wsDot = document.getElementById("wsDot");
+    const wsLabel = document.getElementById("wsLabel");
+    const svcDot = document.getElementById("svcDot");
+    const svcLabel = document.getElementById("svcLabel");
+
+    const STATE_ZH = {
+      IDLE: "空闲",
+      LISTEN: "聆听中",
+      ASR: "识别中",
+      LLM: "思考中",
+      TTS: "播放中",
+    };
+
+    let llmBuf = "";
+
+    function setWs(on, text) {
+      wsDot.className = "dot" + (on ? " on" : "");
+      wsLabel.textContent = text;
+    }
+
+    function setSvc(on, text) {
+      svcDot.className = "dot" + (on ? " on" : on === "busy" ? " busy" : "");
+      if (on === "busy") svcDot.className = "dot busy";
+      svcLabel.textContent = text;
+    }
+
+    function connect() {
+      const ws = new WebSocket(WS_URL);
+      ws.onopen = () => {
+        setWs(true, "已连接");
+        setSvc(true, "语音服务正常");
+      };
+      ws.onclose = () => {
+        setWs(false, "未连接");
+        setSvc(false, "服务离线 · 5 秒后重试");
+        setTimeout(connect, 5000);
+      };
+      ws.onerror = () => setWs(false, "连接错误");
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.type === "state" && msg.value) {
+          stateEl.textContent = STATE_ZH[msg.value] || msg.value;
+          setSvc(msg.value !== "IDLE" ? "busy" : true, msg.value === "IDLE" ? "语音服务正常" : "对话进行中");
+          if (msg.value === "LISTEN" || msg.value === "ASR") llmBuf = "";
+        }
+        if (msg.type === "asr_final" && msg.text) {
+          asrEl.textContent = msg.text;
+          llmBuf = "";
+          replyEl.textContent = "…";
+        }
+        if (msg.type === "asr_partial" && msg.text) asrEl.textContent = msg.text + " …";
+        if (msg.type === "llm_token" && msg.text) {
+          llmBuf += msg.text;
+          replyEl.textContent = llmBuf;
+        }
+        if (msg.type === "tts_sentence" && msg.text) ttsEl.textContent = msg.text;
+      };
+    }
+    connect();
+  </script>
+</body>
+</html>

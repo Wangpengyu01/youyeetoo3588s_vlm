@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Keep screen on
+Comment=Disable auto blank and lock on R1
+Exec=bash /userdata/agent/scripts/keep_screen_on.sh
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
