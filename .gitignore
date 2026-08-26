@@ -1,0 +1,75 @@
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build
+build/
+dist/
+*.o
+*.a
+*.so.dSYM
+
+# Large model weights (board-side only; never commit)
+*.rknn
+*.weight
+*.gguf
+*.bin
+*.onnx
+*.int8.onnx
+InternVL3_5-4B/
+Qwen3-VL-4B/
+Qwen3-0.6B/
+
+# Large SDK / tool bundles
+RK1820_1828_RELEASE*/
+RKDevTool_Release*/
+DriverAssitant*/
+*.tgz
+*.tar.gz
+*.zip
+*.deb
+boot.img
+zboot.img
+rknn3_rk182x*/
+rknn3_vlm_demo
+rknn_*_demo/lib/
+voice/sherpa-onnx-v1*/
+voice/vits-melo-tts*/
+voice/sherpa-onnx-sense-voice*/
+voice/*.tar.bz2
+voice/*.tgz
+
+# Debug dumps
+voice/amixer_dump.txt
+
+# Stub placeholders (404 artifacts)
+voice/internvl_main.cc
+voice/rknn3_api.h
+voice/rknn3_session_test.cpp
+*.wav
+/tmp/
+*.log
+
+# Cursor canvas runtime (source *.canvas.tsx is tracked under canvases/)
+*.canvas.data.json
+*.canvas.status.json
+canvases/node_modules/
+
+# Windows adb push temp
+*.bak
