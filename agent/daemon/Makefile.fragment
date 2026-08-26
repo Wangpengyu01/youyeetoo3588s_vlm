@@ -1,0 +1,11 @@
+# Makefile fragment — merge into rknn3_session_test_demo/Makefile on Linux VM
+# See agent/docs/BUILD_LINUX.md
+
+TARGET_DAEMON := llm_daemon
+DAEMON_SRCS := src/llm_daemon.cpp src/Tokenizer.cpp
+
+$(TARGET_DAEMON): $(DAEMON_SRCS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(DAEMON_SRCS) $(LDFLAGS) $(LIBS)
+
+.PHONY: daemon
+daemon: $(TARGET_DAEMON)

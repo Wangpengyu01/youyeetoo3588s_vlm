@@ -207,7 +207,7 @@ max_history_turns: 8
 
 | 阶段 | 交付物 | 验收 | 状态 |
 |------|--------|------|------|
-| **A** | `llm_daemon` + `llm_client` | 10 轮连贯 · TTFT < 500ms · 流式 token | pending |
+| **A** | `llm_daemon` + `llm_client.py` | 10 轮 · TTFT <500ms · 流式 token | **源码就绪 · 待 VM 编译** |
 | **B** | VAD + orchestrator 骨架 | 始终监听 · 2s 说话 → ASR | pending |
 | **C** | sherpa online ASR | partial/final 事件 | pending |
 | **D** | 分句 TTS 队列 | 首句开播 < 4s E2E | pending |
@@ -230,6 +230,15 @@ max_history_turns: 8
 | 模型（llm 四件套） | `/userdata/models/InternVL3_5-4B/` |
 | 语音硬件 | `source /userdata/voice/scripts/voice_hw_board.sh` |
 | 文档（PC） | `youyeetoo3588s/agent/docs/TECH_PLAN.md` |
+| 编译说明 | `agent/docs/BUILD_LINUX.md` |
+
+---
+
+## 8b. 编译与部署
+
+- **Linux VM：** [`BUILD_LINUX.md`](BUILD_LINUX.md) — 交叉编译 `llm_daemon`
+- **PC 推送：** `powershell -File agent/scripts/push_agent.ps1`
+- **板端验收：** `bash /userdata/agent/scripts/phase_a_test.sh`
 
 ---
 

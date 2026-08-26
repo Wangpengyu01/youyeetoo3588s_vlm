@@ -1,0 +1,6 @@
+# R1 agent — llm_daemon 默认配置 (Phase A)
+system_prompt: |
+  你是运行在 youyeetoo R1 上的中文对话助手。回答简洁、口语化，每次不超过三句话。
+max_new_tokens: 64
+max_history_turns: 8
+socket_path: /tmp/r1-llm.sock
