@@ -24,29 +24,50 @@ def _read_chat_stream(
         s.settimeout(120.0)
         s.connect(sock_path)
         s.sendall((json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
-        f = s.makefile("rb")
+        buf = b""
         usage: dict = {}
         while True:
-            line = f.readline()
-            if not line:
+            chunk = s.recv(4096)
+            if not chunk:
                 break
-            msg = json.loads(line.decode("utf-8"))
-            mtype = msg.get("type")
-            if mtype == "token" and msg.get("id") == req_id:
-                if ttft is None:
-                    ttft = time.time() - t0
-                piece = msg.get("text", "")
-                tokens.append(piece)
-                if on_token and piece:
-                    on_token(piece)
-                if stream_print:
-                    print(piece, end="", flush=True)
-            elif mtype == "done" and msg.get("id") == req_id:
-                usage = msg.get("usage") or {}
-                break
-            elif mtype == "error":
-                raise RuntimeError(msg.get("message", "unknown error"))
-
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    msg = json.loads(line.decode("utf-8"))
+                except UnicodeDecodeError:
+                    msg = json.loads(line.decode("utf-8", errors="replace"))
+                mtype = msg.get("type")
+                if mtype == "token" and msg.get("id") == req_id:
+                    if ttft is None:
+                        ttft = time.time() - t0
+                    piece = msg.get("text", "")
+                    tokens.append(piece)
+                    if on_token and piece:
+                        on_token(piece)
+                    if stream_print:
+                        print(piece, end="", flush=True)
+                elif mtype == "done" and msg.get("id") == req_id:
+                    usage = msg.get("usage") or {}
+                    return {
+                        "id": req_id,
+                        "text": "".join(tokens),
+                        "ttft_s": ttft,
+                        "elapsed_s": time.time() - t0,
+                        "usage": usage,
+                    }
+                elif mtype == "error":
+                    raise RuntimeError(msg.get("message", "unknown error"))
+        if buf.strip():
+            try:
+                msg = json.loads(buf.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                pass
+            else:
+                if msg.get("type") == "done" and msg.get("id") == req_id:
+                    usage = msg.get("usage") or {}
     text = "".join(tokens)
     return {
         "id": req_id,
@@ -94,5 +115,5 @@ def llm_ping(sock_path: str = "/tmp/r1-llm.sock") -> bool:
         s.settimeout(2.0)
         s.connect(sock_path)
         s.sendall(b'{"type":"ping"}\n')
-        line = s.recv(256).decode("utf-8")
-        return "pong" in line
+        line = s.recv(256)
+        return b"pong" in line

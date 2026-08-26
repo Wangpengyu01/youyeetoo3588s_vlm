@@ -94,8 +94,8 @@ rknn3_session_test \
 - [x] **llm_daemon** — InternVL3.5-4B LLM-only 1828 常驻（Ollama 式）
 - [x] **orchestrator** — Python 3 asyncio 状态机
 - [x] **VAD** — 始终监听 + 端点检测
-- [x] **ASR** — 3588 CPU · sherpa-onnx 本地（online 流式，并行验证 offline fallback）
-- [x] **分句 TTS** — 3588 CPU · VITS-melo · 应用层伪流式（非 NPU）
+- [x] **ASR** — 3588 CPU · sherpa-onnx 本地（Phase F：streaming Paraformer · SenseVoice fallback）
+- [x] **分句 TTS** — 3588 CPU · **Matcha zh-baker** · 22kHz · 应用层流水线播放
 - [x] **agent.yaml** — system_prompt / 人设 · 无需微调
 - [x] **agent_api** — HTTP/WebSocket 占位（HDMI 触屏后排）
 
@@ -117,7 +117,7 @@ Mic → VAD → sherpa ASR (CPU)      llm_daemon (RKNN3)
        ↓                                ↑
 orchestrator (asyncio) ──/tmp/r1-llm.sock──┘
        ↓                         InternVL3.5-4B
-分句 → VITS TTS (CPU) → play_wav   LLM-only ~236MB
+分句 → Matcha TTS (CPU) → play_wav   LLM-only ~236MB
        ↓
 J368 喇叭
 
@@ -212,10 +212,11 @@ max_history_turns: 8
 | **C** | sherpa ASR partial/final + LLM | inject-wav / 实时识别 | **done** |
 | **D** | 分句 TTS 队列 | 首句开播 < 4s E2E | **done** |
 | **E** | `agent.yaml` + agent_api 占位 | WS 可连 · 状态推送 | **done** |
+| **F** | Streaming Paraformer ASR | inject-wav · first_play &lt; 5s · 真 partial | **done** |
 | **S** | VLM spike S1–S3 | 见 §4.1 | parallel |
 | **P5b** | `see()` 或统一 `vlm_daemon` | spike 结果定案 | deferred |
 
-顺序：**A → B → C → D → E**；**S 与 A 并行**。
+顺序：**A → B → C → D → E → F**；**S 与 A 并行**。
 
 ---
 
@@ -277,3 +278,4 @@ bash /userdata/agent/scripts/agent_chat.sh
 |------|------|------|
 | draft-0 | 2026-08-26 | 初始化骨架 |
 | **v1.0** | **2026-08-26** | 锁定模型规格 · 决策 D1–D7 · v1+spike→P5b 路径 |
+| **v1.1** | **2026-08-26** | Matcha TTS 上线 · Phase F streaming Paraformer ASR 进行中 |

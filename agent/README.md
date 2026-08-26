@@ -2,7 +2,7 @@
 
 youyeetoo R1（RK3588S）+ RM1828（RK1828）端侧对话智能体。
 
-**当前阶段：** Phase A–E ✅ · v1 语音对话闭环完成
+**当前阶段：** Phase A–E ✅ · Phase F 流式 Paraformer ASR 进行中 · Matcha TTS 已上线
 
 ## 与现有代码的关系
 
@@ -17,6 +17,7 @@ youyeetoo R1（RK3588S）+ RM1828（RK1828）端侧对话智能体。
 ## 文档
 
 - [`docs/TECH_PLAN.md`](docs/TECH_PLAN.md) — **v1.0 技术方案**（常驻模型四件套 · IPC · 阶段）
+- [`docs/ASR_STREAMING.md`](docs/ASR_STREAMING.md) — **Phase F** streaming Paraformer ASR
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 架构概览
 
 **常驻模型：** InternVL3.5-4B **LLM-only**（`/userdata/models/InternVL3_5-4B/` llm 四件套 · ~236MB · 1828）
@@ -37,4 +38,5 @@ agent/
 ## 快速链接
 
 - 路线图 Canvas：`r1-vlm-agent-roadmap.canvas.tsx`
+- Phase F Canvas：`asr-streaming-paraformer.canvas.tsx`
 - 语音硬件冻结：`../voice/scripts/voice_hw_board.sh`

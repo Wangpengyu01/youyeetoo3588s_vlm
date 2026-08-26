@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 
 _PRIMARY = re.compile(r"([^。！？!?]+[。！？!?])")
+_COMMA = re.compile(r"([^，,]{6,40}[，,])")
+_CJK = re.compile(r"[\u4e00-\u9fff]")
 
 # Strip markdown / list markers that sound bad in TTS
 _MD_BOLD = re.compile(r"\*\*([^*]+)\*\*")
@@ -23,8 +25,8 @@ def sanitize_tts_text(text: str) -> str:
     return text
 
 
-def drain_complete_sentences(buffer: str, *, min_flush_chars: int = 999) -> tuple[list[str], str]:
-    """Return completed sentences (。！？ only) and leftover buffer."""
+def drain_complete_sentences(buffer: str, *, min_flush_chars: int = 18) -> tuple[list[str], str]:
+    """Return completed sentences and leftover buffer."""
     out: list[str] = []
     rest = buffer
     while True:
@@ -35,12 +37,27 @@ def drain_complete_sentences(buffer: str, *, min_flush_chars: int = 999) -> tupl
                 out.append(sent)
             rest = rest[m.end() :]
             continue
-        if len(rest) >= min_flush_chars:
-            sent = sanitize_tts_text(rest.strip())
-            if sent:
+        m = _COMMA.match(rest)
+        if m:
+            sent = sanitize_tts_text(m.group(1))
+            if sent and _CJK.search(sent):
                 out.append(sent)
-            rest = ""
-            break
+                rest = rest[m.end() :]
+                continue
+        if len(rest) >= min_flush_chars:
+            chunk = rest[: min_flush_chars + 8]
+            if _CJK.search(chunk):
+                sent = sanitize_tts_text(chunk)
+                if sent:
+                    out.append(sent)
+                rest = rest[len(chunk) :].lstrip()
+                continue
+            if len(rest) >= min_flush_chars * 3:
+                sent = sanitize_tts_text(rest[:min_flush_chars].strip())
+                if sent:
+                    out.append(sent)
+                rest = rest[min_flush_chars:].lstrip()
+                continue
         break
     return out, rest
 

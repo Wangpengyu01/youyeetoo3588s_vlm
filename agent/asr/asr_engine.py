@@ -1,4 +1,4 @@
-"""Streaming ASR session — simulate partial + final with SenseVoice."""
+"""Streaming ASR session — SenseVoice offline or Paraformer online."""
 from __future__ import annotations
 
 import asyncio
@@ -6,10 +6,11 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Protocol
 
 from asr.audio_util import float32_to_int16_bytes, write_wav_int16
 from asr.sense_voice import SenseVoiceAsr, SenseVoiceConfig
+from asr.sherpa_streaming_asr import StreamingParaformerConfig, StreamingParaformerRecognizer
 
 LOG = logging.getLogger(__name__)
 
@@ -17,9 +18,19 @@ PartialCb = Callable[[str], Awaitable[None]]
 FinalCb = Callable[[str, dict], Awaitable[None]]
 
 
+class _AsrBackend(Protocol):
+    def reset(self) -> None: ...
+
+    def feed(self, samples: list[float], sample_rate: int) -> str: ...
+
+    def finalize(self, samples: list[float], sample_rate: int) -> str: ...
+
+
 @dataclass
 class AsrEngineConfig:
+    backend: str = "sense_voice"
     sense_voice: SenseVoiceConfig = field(default_factory=SenseVoiceConfig)
+    streaming_paraformer: StreamingParaformerConfig = field(default_factory=StreamingParaformerConfig)
     sample_rate: int = 16000
     partial_interval_sec: float = 1.2
     partial_min_sec: float = 0.8
@@ -29,11 +40,66 @@ class AsrEngineConfig:
     utterance_wav: str = "/userdata/agent/run/last_utterance.wav"
 
 
+class _SenseVoiceBackend:
+    def __init__(self, recognizer: SenseVoiceAsr, sample_rate: int) -> None:
+        self.recognizer = recognizer
+        self.sample_rate = sample_rate
+        self._buffer: list[float] = []
+
+    def reset(self) -> None:
+        self._buffer.clear()
+
+    def feed(self, samples: list[float], sample_rate: int) -> str:
+        self._buffer.extend(samples)
+        return ""
+
+    def finalize(self, samples: list[float], sample_rate: int) -> str:
+        buf = list(samples) if samples else self._buffer
+        if not buf:
+            return ""
+        return self.recognizer.recognize_samples(buf, sample_rate, boost=True).strip()
+
+
+class _StreamingParaformerBackend:
+    def __init__(self, recognizer: StreamingParaformerRecognizer, sample_rate: int) -> None:
+        self.recognizer = recognizer
+        self.sample_rate = sample_rate
+        self._buffer: list[float] = []
+
+    def reset(self) -> None:
+        self._buffer.clear()
+        self.recognizer.reset()
+
+    def feed(self, samples: list[float], sample_rate: int) -> str:
+        self._buffer.extend(samples)
+        if not samples:
+            return ""
+        return self.recognizer.feed(samples, sample_rate).strip()
+
+    def finalize(self, samples: list[float], sample_rate: int) -> str:
+        buf = list(samples) if samples else self._buffer
+        if buf:
+            self.recognizer.reset()
+            chunk = max(1, int(sample_rate * 0.2))
+            for i in range(0, len(buf), chunk):
+                self.recognizer.feed(buf[i : i + chunk], sample_rate)
+        return self.recognizer.finalize().strip()
+
+
 class AsrEngine:
     def __init__(self, cfg: AsrEngineConfig) -> None:
         self.cfg = cfg
-        self.recognizer = SenseVoiceAsr(cfg.sense_voice)
         self.utterance_path = Path(cfg.utterance_wav)
+        self.backend_name = cfg.backend.strip().lower()
+        if self.backend_name == "streaming_paraformer":
+            self._backend_impl: _AsrBackend = _StreamingParaformerBackend(
+                StreamingParaformerRecognizer(cfg.streaming_paraformer),
+                cfg.sample_rate,
+            )
+            LOG.info("[asr] backend=streaming_paraformer dir=%s", cfg.streaming_paraformer.model_dir)
+        else:
+            self._backend_impl = _SenseVoiceBackend(SenseVoiceAsr(cfg.sense_voice), cfg.sample_rate)
+            LOG.info("[asr] backend=sense_voice dir=%s", cfg.sense_voice.model_dir)
 
     def create_session(
         self,
@@ -59,6 +125,7 @@ class StreamingAsrSession:
         self._last_partial_text = ""
         self._partial_running = False
         self._partial_count = 0
+        self._streaming = engine.backend_name == "streaming_paraformer"
 
     @property
     def buffer_sec(self) -> float:
@@ -70,17 +137,23 @@ class StreamingAsrSession:
         self._last_partial_at = time.monotonic()
         self._last_partial_text = ""
         self._partial_count = 0
+        await asyncio.to_thread(self.engine._backend_impl.reset)
 
     async def feed(self, samples: list[float]) -> None:
         if not self._active or not samples:
             return
         self._buffer.extend(samples)
-        if self.engine.cfg.partial_enabled:
-            asyncio.create_task(self._maybe_partial())
+        if not self.engine.cfg.partial_enabled:
+            return
+        if self._streaming:
+            await self._streaming_partial(samples)
+        else:
+            asyncio.create_task(self._maybe_partial_offline())
 
     async def cancel(self) -> None:
         self._active = False
         self._buffer.clear()
+        await asyncio.to_thread(self.engine._backend_impl.reset)
 
     async def finalize_samples(self, samples: list[float]) -> dict:
         self._buffer = list(samples)
@@ -93,6 +166,7 @@ class StreamingAsrSession:
         if duration < cfg.min_duration_sec:
             result = {"status": "skipped", "reason": "too_short", "duration_sec": duration, "text": ""}
             await self.on_final("", result)
+            await asyncio.to_thread(self.engine._backend_impl.reset)
             return result
 
         pcm = float32_to_int16_bytes(self._buffer)
@@ -100,29 +174,69 @@ class StreamingAsrSession:
         write_wav_int16(self.engine.utterance_path, pcm, sample_rate=cfg.sample_rate)
         LOG.info("[asr] saved utterance %.2fs -> %s", duration, self.engine.utterance_path)
 
-        text = await asyncio.to_thread(
-            self.engine.recognizer.recognize_samples,
-            self._buffer,
-            cfg.sample_rate,
-            boost=True,
-            wav_path=self.engine.utterance_path,
-        )
+        t0 = time.monotonic()
+        impl = self.engine._backend_impl
+        if isinstance(impl, _SenseVoiceBackend):
+            text = await asyncio.to_thread(
+                impl.recognizer.recognize_samples,
+                self._buffer,
+                cfg.sample_rate,
+                boost=True,
+                wav_path=self.engine.utterance_path,
+            )
+        else:
+            text = await asyncio.to_thread(
+                impl.finalize,
+                self._buffer,
+                cfg.sample_rate,
+            )
+        asr_ms = int((time.monotonic() - t0) * 1000)
         text = text.strip()
-        LOG.info("[asr] final: %s", text or "(empty)")
+        LOG.info("[asr] final (%dms): %s", asr_ms, text or "(empty)")
         result = {
             "status": "ok" if text else "empty",
             "duration_sec": duration,
             "wav": str(self.engine.utterance_path),
             "text": text,
+            "asr_ms": asr_ms,
+            "backend": self.engine.backend_name,
         }
         await self.on_final(text, result)
         self._buffer.clear()
+        await asyncio.to_thread(self.engine._backend_impl.reset)
         return result
 
-    async def _maybe_partial(self) -> None:
+    async def _streaming_partial(self, samples: list[float]) -> None:
         cfg = self.engine.cfg
-        if not cfg.partial_enabled:
+        if self._partial_running:
             return
+        if self._partial_count >= cfg.max_partials_per_utterance:
+            return
+        if self.buffer_sec < cfg.partial_min_sec:
+            return
+        now = time.monotonic()
+        if now - self._last_partial_at < cfg.partial_interval_sec:
+            return
+
+        self._partial_running = True
+        self._last_partial_at = now
+        try:
+            text = await asyncio.to_thread(
+                self.engine._backend_impl.feed,
+                list(samples),
+                cfg.sample_rate,
+            )
+            text = text.strip()
+            if text and text != self._last_partial_text:
+                self._last_partial_text = text
+                self._partial_count += 1
+                LOG.info("[asr] partial: %s", text)
+                await self.on_partial(text)
+        finally:
+            self._partial_running = False
+
+    async def _maybe_partial_offline(self) -> None:
+        cfg = self.engine.cfg
         if self._partial_running:
             return
         if self._partial_count >= cfg.max_partials_per_utterance:
@@ -137,11 +251,14 @@ class StreamingAsrSession:
         self._last_partial_at = now
         buf_snapshot = list(self._buffer)
         try:
+            impl = self.engine._backend_impl
+            if not isinstance(impl, _SenseVoiceBackend):
+                return
             text = await asyncio.to_thread(
-                self.engine.recognizer.recognize_samples,
+                impl.recognizer.recognize_samples,
                 buf_snapshot,
                 cfg.sample_rate,
-                boost=False,
+                False,
             )
             text = text.strip()
             if text and text != self._last_partial_text:

@@ -15,6 +15,7 @@ from api.event_bus import EventBus
 from api.ws_server import run_ws_server
 from asr.asr_engine import AsrEngine, AsrEngineConfig
 from asr.sense_voice import SenseVoiceConfig
+from asr.sherpa_streaming_asr import StreamingParaformerConfig
 from asr.vad_stream import VadConfig, VadStream
 from llm.client import llm_chat_stream, llm_ping
 from orchestrator.config_loader import load_yaml
@@ -71,8 +72,10 @@ class Orchestrator:
         )
 
         utterance = paths.get("utterance_wav", str(agent_root / "run" / "last_utterance.wav"))
+        asr_backend = str(asr_cfg.get("backend", "sense_voice")).strip().lower()
         self.asr_engine = AsrEngine(
             AsrEngineConfig(
+                backend=asr_backend,
                 sense_voice=SenseVoiceConfig(
                     model_dir=asr_cfg.get(
                         "model_dir",
@@ -88,6 +91,21 @@ class Orchestrator:
                     ),
                     language=str(asr_cfg.get("language", "zh")),
                     num_threads=int(asr_cfg.get("num_threads", 2)),
+                ),
+                streaming_paraformer=StreamingParaformerConfig(
+                    model_dir=asr_cfg.get(
+                        "model_dir",
+                        "/userdata/voice/sherpa-onnx-streaming-paraformer-bilingual-zh-en",
+                    ),
+                    sherpa_lib=asr_cfg.get(
+                        "sherpa_lib",
+                        "/userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib",
+                    ),
+                    encoder=str(asr_cfg.get("encoder", "encoder.int8.onnx")),
+                    decoder=str(asr_cfg.get("decoder", "decoder.int8.onnx")),
+                    tokens=str(asr_cfg.get("tokens", "tokens.txt")),
+                    num_threads=int(asr_cfg.get("num_threads", 2)),
+                    sample_rate=int(vad_cfg.get("sample_rate", 16000)),
                 ),
                 sample_rate=self.vad_config.sample_rate,
                 partial_interval_sec=float(asr_cfg.get("partial_interval_sec", 1.2)),

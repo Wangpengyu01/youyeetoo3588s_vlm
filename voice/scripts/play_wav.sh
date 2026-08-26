@@ -69,6 +69,20 @@ run_aplay() {
 if ! run_aplay; then
   kill "${GUARD_PID}" 2>/dev/null || true
   wait "${GUARD_PID}" 2>/dev/null || true
+  if [ "${PLAYBACK_RATE:-16000}" != "16000" ]; then
+    echo "[play] retry at 16000 Hz (ES8323 rejects ${PLAYBACK_RATE} Hz)" >&2
+    PLAYBACK_RATE=16000 python3 /userdata/voice/scripts/wav_to_16k_mono.py "${WAV}" "${PLAY}" >&2
+    if run_aplay; then
+      kill "${GUARD_PID}" 2>/dev/null || true
+      wait "${GUARD_PID}" 2>/dev/null || true
+      bash /userdata/voice/scripts/speaker_setup.sh >/dev/null
+      if [ "${VOICE_RESTORE_MIC:-1}" = "1" ]; then
+        bash /userdata/voice/scripts/mic_setup.sh >/dev/null 2>&1 || true
+      fi
+      echo "[play] 完成" >&2
+      exit 0
+    fi
+  fi
   echo "[play] aplay failed" >&2
   exit 1
 fi
