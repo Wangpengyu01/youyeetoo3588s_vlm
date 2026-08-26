@@ -25,6 +25,9 @@ dist/
 *.a
 *.so.dSYM
 
+# VM compile copy at repo root (canonical: agent/bin/llm_daemon)
+/llm_daemon
+
 # Large model weights (board-side only; never commit)
 *.rknn
 *.weight
