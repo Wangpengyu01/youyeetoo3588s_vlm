@@ -101,11 +101,15 @@ class Orchestrator:
 
         self.socket_path = cfg.get("socket_path", "/tmp/r1-llm.sock")
         self.max_new_tokens = int(cfg.get("max_new_tokens", 64))
+        self.system_prompt = (cfg.get("system_prompt") or "").strip()
         self.vad_stream = VadStream(self.vad_config, self.vad_queue)
         self.tts_queue = TtsQueue(
             TtsEngine(
                 TtsConfig(
-                    model_dir=tts_cfg.get("model_dir", "/userdata/voice/vits-melo-tts-zh_en"),
+                    backend=str(tts_cfg.get("backend", "matcha")),
+                    model_dir=tts_cfg.get("model_dir", "/userdata/voice/matcha-icefall-zh-baker"),
+                    vocoder=tts_cfg.get("vocoder", "/userdata/voice/vocos-22khz-univ.onnx"),
+                    rule_fsts=list(tts_cfg.get("rule_fsts") or []),
                     sherpa_bin=tts_cfg.get(
                         "sherpa_bin",
                         "/userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/bin/sherpa-onnx-offline-tts",
@@ -115,9 +119,12 @@ class Orchestrator:
                         "/userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib",
                     ),
                     num_threads=int(tts_cfg.get("num_threads", 2)),
-                    max_chars=int(tts_cfg.get("max_chars", 120)),
+                    sid=int(tts_cfg.get("sid", 0)),
+                    speed=float(tts_cfg.get("speed", 1.0)),
+                    max_chars=int(tts_cfg.get("max_chars", 80)),
                 )
-            )
+            ),
+            merge_max_chars=int(tts_cfg.get("merge_max_chars", 40)),
         )
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -211,6 +218,8 @@ class Orchestrator:
 
     async def _run_llm(self, prompt: str) -> None:
         self.set_state(AgentState.LLM)
+        if self.system_prompt:
+            prompt = f"{self.system_prompt}\n\n用户：{prompt}\n助手："
         buffer = {"text": ""}
         loop = asyncio.get_running_loop()
 

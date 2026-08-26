@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert any wav to 16kHz mono S16 for ES8388 playback."""
+"""Convert any wav to mono S16 for ES8388 playback (rate via PLAYBACK_RATE)."""
 import os
 import struct
 import sys
@@ -115,10 +115,11 @@ def main():
     fade_ms = int(os.environ.get("PLAYBACK_FADE_MS", "10"))
     trim_ms = int(os.environ.get("PLAYBACK_TRIM_MS", "60"))
     channels = int(os.environ.get("PLAYBACK_CHANNELS", "1"))
+    out_rate = int(os.environ.get("PLAYBACK_RATE", "16000"))
     rate, samples = read_wav(src)
-    samples = resample(rate, samples, 16000)
+    samples = resample(rate, samples, out_rate)
     if not monitor:
-        samples = trim_leading_silence(samples, rate=16000, max_ms=trim_ms)
+        samples = trim_leading_silence(samples, rate=out_rate, max_ms=trim_ms)
     if monitor:
         samples, gain = auto_gain(
             samples,
@@ -134,15 +135,15 @@ def main():
     else:
         samples = apply_gain(samples, fixed_gain)
         gain = fixed_gain
-    samples = prepend_lead(samples, rate=16000, lead_ms=lead_ms, fade_ms=fade_ms)
+    samples = prepend_lead(samples, rate=out_rate, lead_ms=lead_ms, fade_ms=fade_ms)
     if channels >= 2:
         samples = to_stereo(samples)
         channels = 2
-    write_wav(dst, samples, 16000, channels=channels)
+    write_wav(dst, samples, out_rate, channels=channels)
     peak = max((abs(s) for s in samples), default=0)
     print(
-        f"[play] mode={'monitor' if monitor else 'normal'} ch={channels} gain={gain:.2f} "
-        f"lead={lead_ms}ms fade={fade_ms}ms peak={peak}",
+        f"[play] mode={'monitor' if monitor else 'normal'} ch={channels} rate={out_rate} "
+        f"gain={gain:.2f} lead={lead_ms}ms fade={fade_ms}ms peak={peak}",
         file=sys.stderr,
     )
 
