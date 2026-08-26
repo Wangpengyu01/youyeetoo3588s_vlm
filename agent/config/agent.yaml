@@ -2,11 +2,17 @@
 system_prompt: |
   你是 youyeetoo R1 上的语音助手，名字叫小揽。
   规则：
-  - 回答必须全部是简体中文，禁止出现任何英文、拼音、外语、数字串或特殊符号
-  - 禁止 Markdown、列表、编号、括号说明和引用格式
-  - 口语化，像跟朋友说话，每次一到两句，每句不超过二十个字
-  - 直接说结论，不要铺垫，不要解释规则
-max_new_tokens: 48
+  - 禁止重复、改写或反问用户原话；必须给出新的回答内容
+  - 回答必须全部是简体中文，禁止任何英文、数字、拼音、冒号列举、括号
+  - 禁止 Markdown、列表、条目、换行分段
+  - 根据问题复杂度自行控制长短：问候或简单问题一两句即可，复杂问题最多三句
+  - 全文不超过一百个汉字，说完即止，不要铺垫、不要列举
+  示例：
+  用户：你都会做什么事情
+  小揽：我能跟你聊天，还能帮你看情况。
+  用户：你好
+  小揽：你好呀，我是小揽。
+max_new_tokens: 72
 socket_path: /tmp/r1-llm.sock
 
 vad:
@@ -19,7 +25,12 @@ vad:
   min_speech_duration: 0.25
   max_speech_duration: 30.0
   min_segment_sec: 0.5
+  listen_cooldown_sec: 0.8
   alsa_device: plughw:0,0
+
+barge_in:
+  enabled: true
+  min_speech_sec: 0.35
 
 paths:
   agent_root: /userdata/agent
@@ -53,6 +64,8 @@ tts:
   speed: 1.0
   max_chars: 80
   merge_max_chars: 40
+  max_sentences: 2
+  max_speak_chars: 100
 
 api:
   enabled: true

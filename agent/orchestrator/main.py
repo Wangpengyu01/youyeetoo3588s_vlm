@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +15,21 @@ if str(_AGENT_ROOT) not in sys.path:
 from api.event_bus import EventBus
 from api.ws_server import run_ws_server
 from asr.asr_engine import AsrEngine, AsrEngineConfig
+from asr.normalize import normalize_user_text
 from asr.sense_voice import SenseVoiceConfig
 from asr.sherpa_streaming_asr import StreamingParaformerConfig
 from asr.vad_stream import VadConfig, VadStream
-from llm.client import llm_chat_stream, llm_ping
+from llm.client import llm_chat_stream, llm_clear_history, llm_ping
 from orchestrator.config_loader import load_yaml
 from orchestrator.events import AgentState
-from tts.sentence_split import drain_complete_sentences, flush_remainder
+from tts.sentence_split import (
+    canned_reply_for,
+    cap_speak_text,
+    count_cjk,
+    drain_complete_sentences,
+    is_robotic_reply,
+    pick_first_sentence,
+)
 from tts.tts_engine import TtsConfig, TtsEngine
 from tts.tts_queue import TtsQueue
 
@@ -41,19 +50,27 @@ class Orchestrator:
         self.agent_root = agent_root
         self.state = AgentState.IDLE
         self.vad_queue: asyncio.Queue[Any] = asyncio.Queue()
-        self._busy = False
+        self._turn_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._asr_session = None
+        self._listen_cooldown_until = 0.0
+        self._turn_busy = False
+        self._speaking = False
+        self._tts_abort = False
+        self._spoken_cjk = 0
 
         vad_cfg = cfg.get("vad") or {}
         asr_cfg = cfg.get("asr") or {}
         tts_cfg = cfg.get("tts") or {}
         api_cfg = cfg.get("api") or {}
         paths = cfg.get("paths") or {}
+        barge_cfg = cfg.get("barge_in") or {}
 
         self.event_bus = EventBus()
         self.api_enabled = str(api_cfg.get("enabled", "true")).lower() not in ("0", "false", "no")
         self.api_host = str(api_cfg.get("host", "127.0.0.1"))
         self.api_port = int(api_cfg.get("port", 8765))
+        self.barge_in_enabled = str(barge_cfg.get("enabled", "true")).lower() not in ("0", "false", "no")
+        self.barge_in_min_sec = float(barge_cfg.get("min_speech_sec", 0.35))
 
         self.vad_config = VadConfig(
             model_path=vad_cfg.get("model", "/userdata/voice/silero_vad.onnx"),
@@ -70,6 +87,7 @@ class Orchestrator:
             alsa_device=str(vad_cfg.get("alsa_device", "plughw:0,0")),
             min_segment_sec=float(vad_cfg.get("min_segment_sec", 0.5)),
         )
+        self.listen_cooldown_sec = float(vad_cfg.get("listen_cooldown_sec", 0.8))
 
         utterance = paths.get("utterance_wav", str(agent_root / "run" / "last_utterance.wav"))
         asr_backend = str(asr_cfg.get("backend", "sense_voice")).strip().lower()
@@ -119,6 +137,8 @@ class Orchestrator:
 
         self.socket_path = cfg.get("socket_path", "/tmp/r1-llm.sock")
         self.max_new_tokens = int(cfg.get("max_new_tokens", 64))
+        self.max_speak_chars = int(tts_cfg.get("max_speak_chars", 100))
+        self.tts_max_sentences = int(tts_cfg.get("max_sentences", 2))
         self.system_prompt = (cfg.get("system_prompt") or "").strip()
         self.vad_stream = VadStream(self.vad_config, self.vad_queue)
         self.tts_queue = TtsQueue(
@@ -144,6 +164,7 @@ class Orchestrator:
             ),
             merge_max_chars=int(tts_cfg.get("merge_max_chars", 40)),
         )
+        self.tts_queue.set_max_sentences(self.tts_max_sentences)
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def emit(self, event: dict[str, Any]) -> None:
@@ -179,6 +200,22 @@ class Orchestrator:
         self._asr_session = self.asr_engine.create_session(on_partial, on_final)
         return self._asr_session
 
+    async def _interrupt_tts(self) -> None:
+        if not self._speaking:
+            return
+        LOG.info("[barge-in] interrupt TTS playback")
+        self._tts_abort = True
+        self._listen_cooldown_until = 0.0
+        await self.tts_queue.interrupt()
+        await self.emit({"type": "barge_in", "phase": "tts"})
+
+    def _cap_for_tts(self, text: str) -> str:
+        remaining = self.max_speak_chars - self._spoken_cjk
+        capped = cap_speak_text(text, remaining)
+        if capped:
+            self._spoken_cjk += count_cjk(capped)
+        return capped
+
     async def run_vad_loop(self, inject_wav: str | None = None) -> None:
         try:
             if inject_wav:
@@ -187,6 +224,14 @@ class Orchestrator:
                 await self.vad_stream.run_live()
         finally:
             await self.vad_queue.put({"type": "shutdown"})
+
+    async def _turn_worker(self) -> None:
+        while True:
+            event = await self._turn_queue.get()
+            try:
+                await self._process_turn(event)
+            finally:
+                self._turn_queue.task_done()
 
     async def handle_events(self) -> None:
         self.set_state(AgentState.LISTEN)
@@ -201,47 +246,92 @@ class Orchestrator:
                 continue
             if etype == "speech_start":
                 LOG.info("[event] speech_start")
+                if self.barge_in_enabled and self._speaking:
+                    await self._interrupt_tts()
                 self._new_asr_session()
                 await self._asr_session.start()
                 continue
             if etype == "speech_end":
                 LOG.info("[event] speech_end")
                 continue
-            if etype == "audio_chunk" and self._asr_session and not self._busy:
+            if etype == "audio_chunk" and self._asr_session and (not self._turn_busy or self._speaking):
                 await self._asr_session.feed(event["samples"])
                 continue
-            if etype == "audio_segment" and not self._busy:
-                await self._on_segment(event)
+            if etype == "audio_segment":
+                duration = float(event.get("duration_sec", 0.0))
+                if self._turn_busy and not self._speaking:
+                    LOG.info("[vad] busy ASR/LLM, drop %.2fs segment", duration)
+                    continue
+                if not self._speaking and time.monotonic() < self._listen_cooldown_until:
+                    LOG.info("[vad] post-tts cooldown, skip %.2fs segment", duration)
+                    continue
+                if self.barge_in_enabled and self._speaking:
+                    if duration < self.barge_in_min_sec:
+                        LOG.info("[barge-in] segment too short (%.2fs), skip", duration)
+                        continue
+                    await self._interrupt_tts()
+                await self._turn_queue.put(event)
 
-    async def _on_segment(self, event: dict[str, Any]) -> None:
-        self._busy = True
+    async def _process_turn(self, event: dict[str, Any]) -> None:
+        self._turn_busy = True
+        self._tts_abort = False
+        self._spoken_cjk = 0
         self.tts_queue.mark_utterance_start()
         duration = event.get("duration_sec", 0.0)
         LOG.info("[event] audio_segment %.2fs", duration)
         self.set_state(AgentState.ASR)
+        session = self._asr_session
         try:
-            if not self._asr_session:
-                self._new_asr_session()
-                await self._asr_session.start()
-            result = await self._asr_session.finalize_samples(event["samples"])
-            text = (result.get("text") or "").strip()
+            if not session:
+                session = self._new_asr_session()
+                await session.start()
+            result = await session.finalize_samples(event["samples"])
+            text = normalize_user_text((result.get("text") or "").strip())
             if text:
+                LOG.info("[asr] normalized: %s", text)
                 await self._run_llm(text)
             else:
                 LOG.info("[asr] no text recognized")
         finally:
-            self._asr_session = None
+            if self._asr_session is session:
+                self._asr_session = None
+            self._speaking = False
+            self._turn_busy = False
             self.set_state(AgentState.LISTEN)
-            self._busy = False
 
     async def _run_llm(self, prompt: str) -> None:
+        user_prompt = prompt
         self.set_state(AgentState.LLM)
+        await asyncio.to_thread(llm_clear_history, self.socket_path)
         if self.system_prompt:
-            prompt = f"{self.system_prompt}\n\n用户：{prompt}\n助手："
+            prompt = f"{self.system_prompt}\n\n用户：{prompt}\n小揽："
         buffer = {"text": ""}
+        tts_state = {"n": 0, "cjk": 0}
         loop = asyncio.get_running_loop()
 
+        def _enqueue_tts(sent: str) -> None:
+            if self._tts_abort or tts_state["n"] >= self.tts_max_sentences:
+                return
+            speak = sent
+            if is_robotic_reply(speak):
+                speak = canned_reply_for(user_prompt) or ""
+            if not speak:
+                return
+            speak = cap_speak_text(speak, self.max_speak_chars - tts_state["cjk"])
+            if not speak:
+                return
+            tts_state["n"] += 1
+            tts_state["cjk"] += count_cjk(speak)
+            LOG.info("[event] tts_sentence: %s", speak[:60])
+            asyncio.run_coroutine_threadsafe(
+                self.emit({"type": "tts_sentence", "text": speak}),
+                loop,
+            )
+            asyncio.run_coroutine_threadsafe(self.tts_queue.enqueue(speak), loop)
+
         def on_token(piece: str) -> None:
+            if self._tts_abort:
+                return
             buffer["text"] += piece
             asyncio.run_coroutine_threadsafe(
                 self.emit({"type": "llm_token", "text": piece}),
@@ -249,12 +339,9 @@ class Orchestrator:
             )
             complete, buffer["text"] = drain_complete_sentences(buffer["text"])
             for sent in complete:
-                LOG.info("[event] tts_sentence: %s", sent[:60])
-                asyncio.run_coroutine_threadsafe(
-                    self.emit({"type": "tts_sentence", "text": sent}),
-                    loop,
-                )
-                asyncio.run_coroutine_threadsafe(self.tts_queue.enqueue(sent), loop)
+                _enqueue_tts(sent)
+                if tts_state["n"] >= self.tts_max_sentences or tts_state["cjk"] >= self.max_speak_chars:
+                    break
 
         try:
             reply = await asyncio.to_thread(
@@ -264,21 +351,52 @@ class Orchestrator:
                 sock_path=self.socket_path,
                 max_new_tokens=self.max_new_tokens,
             )
-            for sent in flush_remainder(buffer["text"]):
-                LOG.info("[event] tts_sentence: %s", sent[:60])
-                await self.emit({"type": "tts_sentence", "text": sent})
-                await self.tts_queue.enqueue(sent)
+            full = reply["text"]
+            if tts_state["n"] == 0 and not self._tts_abort:
+                sent = pick_first_sentence(full)
+                if sent and not is_robotic_reply(sent):
+                    sent = self._cap_for_tts(sent)
+                    if sent:
+                        await self.emit({"type": "tts_sentence", "text": sent})
+                        await self.tts_queue.enqueue(sent)
+                        tts_state["n"] += 1
+                        tts_state["cjk"] += count_cjk(sent)
+                elif canned := canned_reply_for(user_prompt):
+                    canned = self._cap_for_tts(canned)
+                    if canned:
+                        await self.emit({"type": "tts_sentence", "text": canned})
+                        await self.tts_queue.enqueue(canned)
+                        tts_state["n"] += 1
+                        tts_state["cjk"] += count_cjk(canned)
+            elif is_robotic_reply(full) and not self._tts_abort:
+                canned = canned_reply_for(user_prompt)
+                if canned:
+                    canned = self._cap_for_tts(canned)
+                    if canned:
+                        await self.tts_queue.discard_pending()
+                        await self.emit({"type": "tts_sentence", "text": canned})
+                        await self.tts_queue.enqueue(canned)
+                        tts_state["n"] += 1
             LOG.info(
                 "[llm] reply (%d chars, ttft=%.3fs): %s",
-                len(reply["text"]),
+                len(full),
                 reply.get("ttft_s") or 0,
-                reply["text"][:120],
+                full[:120],
             )
-            self.set_state(AgentState.TTS)
-            await self.tts_queue.wait_done()
-            lat = self.tts_queue.first_play_latency_s
-            if lat is not None:
-                LOG.info("[tts] utterance first_play=%.2fs (target <4s)", lat)
+            if tts_state["n"] > 0 and not self._tts_abort:
+                self.set_state(AgentState.TTS)
+                self._speaking = True
+                try:
+                    await self.tts_queue.wait_done()
+                finally:
+                    self._speaking = False
+                if not self._tts_abort:
+                    self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
+                lat = self.tts_queue.first_play_latency_s
+                if lat is not None:
+                    LOG.info("[tts] utterance first_play=%.2fs (target <4s)", lat)
+            elif self._tts_abort:
+                LOG.info("[barge-in] skipped post-abort cooldown")
         except OSError as exc:
             LOG.error("[llm] request failed: %s", exc)
 
@@ -290,7 +408,11 @@ class Orchestrator:
         await self.tts_queue.start()
         if self.api_enabled:
             await run_ws_server(self.event_bus, self.api_host, self.api_port)
-        await asyncio.gather(self.run_vad_loop(inject_wav), self.handle_events())
+        await asyncio.gather(
+            self.run_vad_loop(inject_wav),
+            self.handle_events(),
+            self._turn_worker(),
+        )
 
 
 def main() -> None:

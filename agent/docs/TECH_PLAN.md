@@ -48,7 +48,7 @@ v1 在 R1 上交付 **Ollama 式 LLM 常驻服务 + 流式语音对话**：3588 
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | `max_context_len` | **1024** | 与 P3 session_test 一致 |
-| `max_new_tokens` | **64** | 控制 TTS 时长 · 可 IPC 覆盖 |
+| `max_new_tokens` | **72** | 控制生成时长 · ≈100 汉字 · 可 IPC 覆盖 |
 | `core_mask` | **0xff** | 1828 全核 |
 | `keep_history` | **1** | 多轮 KV cache |
 | `max_history_turns` | **8–10** | 超出滑动截断 |
@@ -96,7 +96,8 @@ rknn3_session_test \
 - [x] **VAD** — 始终监听 + 端点检测
 - [x] **ASR** — 3588 CPU · sherpa-onnx 本地（Phase F：streaming Paraformer · SenseVoice fallback）
 - [x] **分句 TTS** — 3588 CPU · **Matcha zh-baker** · 22kHz · 应用层流水线播放
-- [x] **agent.yaml** — system_prompt / 人设 · 无需微调
+- [x] **agent.yaml** — system_prompt / 人设 · ≤100 字 · 无需微调
+- [x] **TTS barge-in（阶段 A）** — 播放中可打断 · Phase G
 - [x] **agent_api** — HTTP/WebSocket 占位（HDMI 触屏后排）
 
 ### 不包含（v1）
@@ -104,7 +105,7 @@ rknn3_session_test \
 - [ ] `see()` / RTSP 看图进对话
 - [ ] 统一 `vlm_daemon`（待 spike 通过后 P5b）
 - [ ] HDMI 触屏 UI 实现
-- [ ] 唤醒词 · barge-in · 模型微调
+- [ ] 唤醒词 · LLM barge-in（Phase G-b）· 模型微调
 
 ---
 
@@ -193,8 +194,14 @@ WebSocket `ws://127.0.0.1:8765/ws` 推送：`state` · `asr_partial` · `llm_tok
 
 ```yaml
 system_prompt: |
-  你是运行在 youyeetoo R1 上的中文对话助手。回答简洁口语化，单次不超过三句话。
-max_new_tokens: 64
+  你是小揽…按复杂度控制长短，全文不超过一百个汉字。
+max_new_tokens: 72
+tts:
+  max_speak_chars: 100
+  max_sentences: 2
+barge_in:
+  enabled: true
+  min_speech_sec: 0.35
 max_history_turns: 8
 ```
 
@@ -213,10 +220,12 @@ max_history_turns: 8
 | **D** | 分句 TTS 队列 | 首句开播 < 4s E2E | **done** |
 | **E** | `agent.yaml` + agent_api 占位 | WS 可连 · 状态推送 | **done** |
 | **F** | Streaming Paraformer ASR | inject-wav · first_play &lt; 5s · 真 partial | **done** |
+| **G** | 长度控制 + TTS barge-in A | ≤100 字 · 播放可打断 | **done** |
+| **G-b** | LLM cancel barge-in | daemon abort · 生成中途可停 | planned |
 | **S** | VLM spike S1–S3 | 见 §4.1 | parallel |
 | **P5b** | `see()` 或统一 `vlm_daemon` | spike 结果定案 | deferred |
 
-顺序：**A → B → C → D → E → F**；**S 与 A 并行**。
+顺序：**A → B → C → D → E → F → G**；**S 与 A 并行**；**G-b** 在 G 之后按需。
 
 ---
 
@@ -279,3 +288,4 @@ bash /userdata/agent/scripts/agent_chat.sh
 | draft-0 | 2026-08-26 | 初始化骨架 |
 | **v1.0** | **2026-08-26** | 锁定模型规格 · 决策 D1–D7 · v1+spike→P5b 路径 |
 | **v1.1** | **2026-08-26** | Matcha TTS 上线 · Phase F streaming Paraformer ASR 进行中 |
+| **v1.2** | **2026-08-26** | Phase G：≤100 字长度控制 · TTS barge-in 阶段 A |

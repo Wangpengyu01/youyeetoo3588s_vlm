@@ -4,6 +4,9 @@ set -euo pipefail
 CARD="${1:-0}"
 TRIES="${MIC_ARM_TRIES:-10}"
 INTER="${MIC_ARM_INTERVAL:-0.06}"
+TRIES="${TRIES//$'\r'/}"
+INTER="${INTER//$'\r'/}"
+ROUTE="${ROUTE//$'\r'/}"
 
 source /userdata/voice/scripts/voice_env.sh 2>/dev/null || true
 ROUTE="${MIC_ROUTE:-main_board}"

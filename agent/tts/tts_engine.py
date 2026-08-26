@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,6 +33,9 @@ class TtsEngine:
         self.cfg = cfg or TtsConfig()
         self.model_dir = Path(self.cfg.model_dir)
         self._native: object | None = None
+        self._play_proc: subprocess.Popen[bytes] | None = None
+        self._play_lock = threading.Lock()
+        self._play_stopped = False
         try:
             from tts.sherpa_tts import SherpaOfflineTts, SherpaTtsConfig
 
@@ -114,7 +119,43 @@ class TtsEngine:
         if fast:
             env["PLAYBACK_WARMUP_SEC"] = "0"
             env["VOICE_RESTORE_MIC"] = "0"
-        subprocess.run(["bash", str(play_script), str(wav_path)], check=True, env=env)
+        with self._play_lock:
+            self._play_stopped = False
+            self._play_proc = subprocess.Popen(
+                ["bash", str(play_script), str(wav_path)],
+                env=env,
+                start_new_session=True,
+            )
+            proc = self._play_proc
+        assert proc is not None
+        rc = proc.wait()
+        with self._play_lock:
+            self._play_proc = None
+            stopped = self._play_stopped
+        if stopped:
+            LOG.info("[tts] playback stopped (barge-in)")
+            return
+        if rc != 0:
+            raise RuntimeError(f"play_wav exited {rc}")
+
+    def stop_playback(self) -> None:
+        with self._play_lock:
+            self._play_stopped = True
+            proc = self._play_proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=1.0)
 
     def speak(self, text: str) -> None:
         LOG.info("[tts] speak: %s", text[:80])

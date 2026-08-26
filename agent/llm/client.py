@@ -117,3 +117,17 @@ def llm_ping(sock_path: str = "/tmp/r1-llm.sock") -> bool:
         s.sendall(b'{"type":"ping"}\n')
         line = s.recv(256)
         return b"pong" in line
+
+
+def llm_clear_history(sock_path: str = "/tmp/r1-llm.sock") -> None:
+    """Clear llm_daemon KV cache — voice turns are single-shot Q&A."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(5.0)
+        s.connect(sock_path)
+        s.sendall(b'{"type":"clear_history"}\n')
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(256)
+            if not chunk:
+                break
+            buf += chunk

@@ -4,16 +4,47 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import time
 from pathlib import Path
 
 VOICE_SCRIPTS = Path(os.environ.get("VOICE_SCRIPTS", "/userdata/voice/scripts"))
 
 
-def arm_mic() -> None:
+def arm_mic(*, retries: int = 2) -> None:
+    """Lock ES8388 mic route; retry once like voice/scripts/asr.sh."""
     script = VOICE_SCRIPTS / "mic_arm.sh"
+    hw = VOICE_SCRIPTS / "voice_hw_board.sh"
     if not script.is_file():
         raise FileNotFoundError(script)
-    subprocess.run(["bash", str(script)], check=True)
+    env = os.environ.copy()
+    if hw.is_file():
+        # Ensure MIC_ROUTE / MIC_ARM_* match frozen board profile when orchestrator
+        # is started without sourcing voice_hw_board.sh in the parent shell.
+        for line in hw.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("export ") and "=" in line:
+                key, _, val = line[len("export ") :].partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in env:
+                    env[key] = val
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
+        proc = subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if proc.returncode == 0:
+            if proc.stderr:
+                print(proc.stderr.rstrip(), flush=True)
+            return
+        last_err = subprocess.CalledProcessError(proc.returncode, proc.args, proc.stderr)
+        if attempt < retries:
+            time.sleep(0.2)
+    assert last_err is not None
+    raise last_err
 
 
 def setup_mic() -> None:
