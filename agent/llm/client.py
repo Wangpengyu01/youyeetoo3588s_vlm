@@ -5,21 +5,16 @@ import json
 import socket
 import time
 import uuid
+from collections.abc import Callable
 
 
-def llm_chat(
-    prompt: str,
+def _read_chat_stream(
+    sock_path: str,
+    payload: dict,
     *,
-    sock_path: str = "/tmp/r1-llm.sock",
-    max_new_tokens: int = 64,
+    on_token: Callable[[str], None] | None = None,
     stream_print: bool = False,
 ) -> dict:
-    payload = {
-        "type": "chat",
-        "id": str(uuid.uuid4())[:8],
-        "prompt": prompt,
-        "max_new_tokens": max_new_tokens,
-    }
     req_id = payload["id"]
     t0 = time.time()
     ttft: float | None = None
@@ -42,6 +37,8 @@ def llm_chat(
                     ttft = time.time() - t0
                 piece = msg.get("text", "")
                 tokens.append(piece)
+                if on_token and piece:
+                    on_token(piece)
                 if stream_print:
                     print(piece, end="", flush=True)
             elif mtype == "done" and msg.get("id") == req_id:
@@ -58,6 +55,38 @@ def llm_chat(
         "elapsed_s": time.time() - t0,
         "usage": usage,
     }
+
+
+def llm_chat(
+    prompt: str,
+    *,
+    sock_path: str = "/tmp/r1-llm.sock",
+    max_new_tokens: int = 64,
+    stream_print: bool = False,
+    on_token: Callable[[str], None] | None = None,
+) -> dict:
+    payload = {
+        "type": "chat",
+        "id": str(uuid.uuid4())[:8],
+        "prompt": prompt,
+        "max_new_tokens": max_new_tokens,
+    }
+    return _read_chat_stream(sock_path, payload, on_token=on_token, stream_print=stream_print)
+
+
+def llm_chat_stream(
+    prompt: str,
+    on_token: Callable[[str], None],
+    *,
+    sock_path: str = "/tmp/r1-llm.sock",
+    max_new_tokens: int = 64,
+) -> dict:
+    return llm_chat(
+        prompt,
+        sock_path=sock_path,
+        max_new_tokens=max_new_tokens,
+        on_token=on_token,
+    )
 
 
 def llm_ping(sock_path: str = "/tmp/r1-llm.sock") -> bool:

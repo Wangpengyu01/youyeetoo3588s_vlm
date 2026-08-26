@@ -1,4 +1,4 @@
-"""Asyncio orchestrator — Phase C: VAD → ASR (partial/final) → LLM."""
+"""Asyncio orchestrator — Phase D: VAD → ASR → LLM stream → TTS queue."""
 from __future__ import annotations
 
 import asyncio
@@ -14,9 +14,12 @@ if str(_AGENT_ROOT) not in sys.path:
 from asr.asr_engine import AsrEngine, AsrEngineConfig
 from asr.sense_voice import SenseVoiceConfig
 from asr.vad_stream import VadConfig, VadStream
-from llm.client import llm_chat, llm_ping
+from llm.client import llm_chat_stream, llm_ping
 from orchestrator.config_loader import load_yaml
 from orchestrator.events import AgentState
+from tts.sentence_split import drain_complete_sentences, flush_remainder
+from tts.tts_engine import TtsConfig, TtsEngine
+from tts.tts_queue import TtsQueue
 
 LOG = logging.getLogger("orchestrator")
 
@@ -40,6 +43,7 @@ class Orchestrator:
 
         vad_cfg = cfg.get("vad") or {}
         asr_cfg = cfg.get("asr") or {}
+        tts_cfg = cfg.get("tts") or {}
         paths = cfg.get("paths") or {}
 
         self.vad_config = VadConfig(
@@ -90,6 +94,24 @@ class Orchestrator:
         self.socket_path = cfg.get("socket_path", "/tmp/r1-llm.sock")
         self.max_new_tokens = int(cfg.get("max_new_tokens", 64))
         self.vad_stream = VadStream(self.vad_config, self.vad_queue)
+        self.tts_queue = TtsQueue(
+            TtsEngine(
+                TtsConfig(
+                    model_dir=tts_cfg.get("model_dir", "/userdata/voice/vits-melo-tts-zh_en"),
+                    sherpa_bin=tts_cfg.get(
+                        "sherpa_bin",
+                        "/userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/bin/sherpa-onnx-offline-tts",
+                    ),
+                    sherpa_lib=tts_cfg.get(
+                        "sherpa_lib",
+                        "/userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib",
+                    ),
+                    num_threads=int(tts_cfg.get("num_threads", 2)),
+                    max_chars=int(tts_cfg.get("max_chars", 120)),
+                )
+            )
+        )
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def set_state(self, new: AgentState) -> None:
         if new != self.state:
@@ -154,6 +176,7 @@ class Orchestrator:
 
     async def _on_segment(self, event: dict[str, Any]) -> None:
         self._busy = True
+        self.tts_queue.mark_utterance_start()
         duration = event.get("duration_sec", 0.0)
         LOG.info("[event] audio_segment %.2fs", duration)
         self.set_state(AgentState.ASR)
@@ -174,16 +197,38 @@ class Orchestrator:
 
     async def _run_llm(self, prompt: str) -> None:
         self.set_state(AgentState.LLM)
+        buffer = {"text": ""}
+        loop = asyncio.get_running_loop()
+
+        def on_token(piece: str) -> None:
+            buffer["text"] += piece
+            complete, buffer["text"] = drain_complete_sentences(buffer["text"])
+            for sent in complete:
+                LOG.info("[event] tts_sentence: %s", sent[:60])
+                asyncio.run_coroutine_threadsafe(self.tts_queue.enqueue(sent), loop)
+
         try:
             reply = await asyncio.to_thread(
-                llm_chat,
+                llm_chat_stream,
                 prompt,
+                on_token,
                 sock_path=self.socket_path,
                 max_new_tokens=self.max_new_tokens,
             )
-            LOG.info("[llm] reply (%d chars, ttft=%.3fs): %s", len(reply["text"]), reply.get("ttft_s") or 0, reply["text"][:120])
+            for sent in flush_remainder(buffer["text"]):
+                LOG.info("[event] tts_sentence: %s", sent[:60])
+                await self.tts_queue.enqueue(sent)
+            LOG.info(
+                "[llm] reply (%d chars, ttft=%.3fs): %s",
+                len(reply["text"]),
+                reply.get("ttft_s") or 0,
+                reply["text"][:120],
+            )
             self.set_state(AgentState.TTS)
-            LOG.info("[tts] stub — Phase D will speak reply")
+            await self.tts_queue.wait_done()
+            lat = self.tts_queue.first_play_latency_s
+            if lat is not None:
+                LOG.info("[tts] utterance first_play=%.2fs (target <4s)", lat)
         except OSError as exc:
             LOG.error("[llm] request failed: %s", exc)
 
@@ -192,17 +237,19 @@ class Orchestrator:
         (self.agent_root / "logs").mkdir(parents=True, exist_ok=True)
         self.set_state(AgentState.IDLE)
         self.ping_llm_daemon()
+        await self.tts_queue.start()
         await asyncio.gather(self.run_vad_loop(inject_wav), self.handle_events())
 
 
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="R1 agent orchestrator (Phase C)")
+    parser = argparse.ArgumentParser(description="R1 agent orchestrator (Phase D)")
     parser.add_argument("--config", default="/userdata/agent/config/agent.yaml")
     parser.add_argument("--agent-root", default="/userdata/agent")
     parser.add_argument("--inject-wav", help="offline test: feed wav instead of mic")
     parser.add_argument("--no-partial", action="store_true", help="disable partial ASR (faster offline test)")
+    parser.add_argument("--no-tts", action="store_true", help="skip TTS playback")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -212,10 +259,19 @@ def main() -> None:
 
     cfg = load_yaml(args.config)
     setup_logging(args.log_level)
-    LOG.info("=== R1 orchestrator Phase C ===")
+    LOG.info("=== R1 orchestrator Phase D ===")
     orch = Orchestrator(cfg, agent_root)
     if args.no_partial or args.inject_wav:
         orch.asr_engine.cfg.partial_enabled = False
+    if args.no_tts:
+        async def _noop_enqueue(text: str) -> None:
+            LOG.info("[tts] skipped: %s", text[:60])
+
+        async def _noop_wait() -> None:
+            return None
+
+        orch.tts_queue.enqueue = _noop_enqueue  # type: ignore[method-assign]
+        orch.tts_queue.wait_done = _noop_wait  # type: ignore[method-assign]
     try:
         asyncio.run(orch.run(inject_wav=args.inject_wav))
     except KeyboardInterrupt:

@@ -31,3 +31,10 @@ asr:
   partial_min_sec: 1.0
   partial_enabled: true
   max_partials_per_utterance: 3
+
+tts:
+  model_dir: /userdata/voice/vits-melo-tts-zh_en
+  sherpa_bin: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/bin/sherpa-onnx-offline-tts
+  sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
+  num_threads: 2
+  max_chars: 120

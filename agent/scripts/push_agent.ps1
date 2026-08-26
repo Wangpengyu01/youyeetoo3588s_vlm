@@ -32,6 +32,7 @@ function Push-PyTree($LocalDir, $RemoteDir) {
 Push-PyTree "$Root\agent\asr" "$Board/asr"
 Push-PyTree "$Root\agent\orchestrator" "$Board/orchestrator"
 Push-PyTree "$Root\agent\llm" "$Board/llm"
+Push-PyTree "$Root\agent\tts" "$Board/tts"
 
 Get-ChildItem "$Root\agent\scripts" -Filter "*.py" | ForEach-Object {
     Push-Lf $_.FullName "$Board/scripts/$($_.Name)"
@@ -55,3 +56,5 @@ Write-Host "[push] done. Tests:"
 Write-Host "  Phase A: adb shell bash $Board/scripts/phase_a_test.sh"
 Write-Host "  Phase B: adb shell bash $Board/scripts/phase_b_test.sh"
 Write-Host "  Phase C: adb shell bash $Board/scripts/phase_c_test.sh"
+Write-Host "  Phase D: adb shell bash $Board/scripts/phase_d_test.sh"
+Write-Host "  Voice chat: adb shell bash $Board/scripts/agent_chat.sh"
