@@ -207,9 +207,9 @@ max_history_turns: 8
 
 | 阶段 | 交付物 | 验收 | 状态 |
 |------|--------|------|------|
-| **A** | `llm_daemon` + `llm_client.py` | 10 轮 · TTFT <500ms · 流式 token | **源码就绪 · 待 VM 编译** |
-| **B** | VAD + orchestrator 骨架 | 始终监听 · 2s 说话 → ASR | pending |
-| **C** | sherpa online ASR | partial/final 事件 | pending |
+| **A** | `llm_daemon` + `llm_client.py` | 10 轮 · TTFT <500ms · 流式 token | **done** |
+| **B** | VAD + orchestrator 骨架 | 始终监听 · 2s 说话 → ASR | **done** |
+| **C** | sherpa ASR partial/final + LLM | inject-wav / 实时识别 | **done** |
 | **D** | 分句 TTS 队列 | 首句开播 < 4s E2E | pending |
 | **E** | `agent.yaml` + agent_api 占位 | WS 可连 · 状态推送 | pending |
 | **S** | VLM spike S1–S3 | 见 §4.1 | parallel |

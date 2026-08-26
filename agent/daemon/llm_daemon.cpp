@@ -102,11 +102,16 @@ static void send_error(int fd, const char *id, const char *message)
 
 static bool json_get_string(const std::string &json, const char *key, std::string &out)
 {
-  std::string needle = std::string("\"") + key + "\":\"";
+  std::string needle = std::string("\"") + key + "\":";
   size_t pos = json.find(needle);
   if (pos == std::string::npos)
     return false;
   pos += needle.size();
+  while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t'))
+    ++pos;
+  if (pos >= json.size() || json[pos] != '"')
+    return false;
+  ++pos;
   out.clear();
   for (size_t i = pos; i < json.size(); ++i)
   {
@@ -138,6 +143,8 @@ static int json_get_int(const std::string &json, const char *key, int fallback)
   if (pos == std::string::npos)
     return fallback;
   pos += needle.size();
+  while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t'))
+    ++pos;
   return atoi(json.c_str() + pos);
 }
 

@@ -120,4 +120,15 @@ python3 /userdata/agent/scripts/llm_client.py --prompt "你好，请用一句话
 |------|------|
 | `No RK182X devices` | 冷启 `adb reboot` · 勿 manual restart rknn3 |
 | init failed | 检查四件套路径 · `rknn-smi info` |
+| `RKNN3_QUERY_LLM_CONFIG, size = 184, expect 408` | **头文件与板端 runtime 不一致**。必须用与 `/usr/bin/rknn3_session_test` 同一套 `rknn3-api/include` 重编；编完可在 VM 跑 `echo 'sizeof check' && grep -r rknn3_api.h ${RKNN3_API_PATH}/include` |
 | socket 无响应 | `tail -f /userdata/agent/logs/llm_daemon.log` |
+
+### API 版本自检（VM 编译前）
+
+板端 `rknn3_session_test` 能跑时，头文件里的 `sizeof(rknn3_llm_config)` 应为 **408**（1.0.5b10 当前板端）。若你编出的 `llm_daemon` 日志里是 `size=184, expect=408`，说明用了**旧版** `rknn3_api.h`，请改用：
+
+```bash
+export RKNN3_API_PATH=~/project/RK182X/rknn/rknn3-api   # 与 session_test_demo Makefile 一致
+grep -n rknn3_llm_config ${RKNN3_API_PATH}/include/rknn3_api.h
+make clean && make llm_daemon
+```

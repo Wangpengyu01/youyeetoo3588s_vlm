@@ -2,7 +2,7 @@
 
 youyeetoo R1（RK3588S）+ RM1828（RK1828）端侧对话智能体。
 
-**当前阶段：** TECH_PLAN **v1.0 已锁定**（2026-08-26）· Phase A `llm_daemon` 实施中。
+**当前阶段：** Phase A/B/C ✅ · 下一步 Phase D（TTS 分句播放）
 
 ## 与现有代码的关系
 

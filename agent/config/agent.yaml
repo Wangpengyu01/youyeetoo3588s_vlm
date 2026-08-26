@@ -1,6 +1,33 @@
-# R1 agent — llm_daemon 默认配置 (Phase A)
+# R1 agent — llm_daemon + orchestrator (Phase A/B)
 system_prompt: |
   你是运行在 youyeetoo R1 上的中文对话助手。回答简洁、口语化，每次不超过三句话。
 max_new_tokens: 64
 max_history_turns: 8
 socket_path: /tmp/r1-llm.sock
+
+vad:
+  model: /userdata/voice/silero_vad.onnx
+  sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
+  sample_rate: 16000
+  chunk_ms: 100
+  threshold: 0.5
+  min_silence_duration: 0.4
+  min_speech_duration: 0.25
+  max_speech_duration: 30.0
+  min_segment_sec: 0.5
+  alsa_device: plughw:0,0
+
+paths:
+  agent_root: /userdata/agent
+  utterance_wav: /userdata/agent/run/last_utterance.wav
+
+asr:
+  model_dir: /userdata/voice/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17
+  sherpa_bin: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/bin/sherpa-onnx-offline
+  sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
+  language: zh
+  num_threads: 2
+  partial_interval_sec: 2.0
+  partial_min_sec: 1.0
+  partial_enabled: true
+  max_partials_per_utterance: 3

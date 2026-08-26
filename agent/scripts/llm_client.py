@@ -21,7 +21,7 @@ def request(sock_path: str, payload: dict, stream: bool = True) -> dict:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(120.0)
         s.connect(sock_path)
-        s.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        s.sendall((json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
         f = s.makefile("rb")
         usage: dict = {}
         while True:
