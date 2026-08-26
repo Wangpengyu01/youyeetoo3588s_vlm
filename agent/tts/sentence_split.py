@@ -23,6 +23,9 @@ def sanitize_tts_text(text: str) -> str:
     text = _MD_LIST.sub("", text)
     text = _MD_HEAD.sub("", text)
     text = text.replace("*", "").replace("`", "").replace("#", "")
+    # LLM 常复读 prompt 里的「小揽：」前缀
+    text = re.sub(r"^小揽[：:]\s*", "", text)
+    text = re.sub(r"三[Dd]?打印", "三维打印", text, flags=re.IGNORECASE)
     text = _ASCII.sub("", text)
     text = _DIGITS.sub("", text)
     text = re.sub(r"[：:；;、·\-—–\.．\(\)（）【】\[\]「」\"\"'\"]+", "", text)
@@ -87,35 +90,69 @@ def drain_complete_sentences(buffer: str, *, min_flush_chars: int = 22) -> tuple
     return out, rest
 
 
-_BAD_REPLY = re.compile(r"人工智能|以下是|我可以帮助|助手|没有名字|小AI|有什么需要|帮忙的吗")
-_CAPABILITY = re.compile(r"做什么|会什么|能干|帮我什么")
+_BAD_REPLY = re.compile(
+    r"人工智能|以下是|我可以帮助|助手|没有名字|小AI|有什么需要|帮忙的吗"
+    r"|爱因斯坦|广义相对论|自然界|深度学习|Transformer|以下方法|如果您能提供|乐意帮助"
+)
+_CAPABILITY = re.compile(r"做什么|会什么|能干|帮我什么|都会做")
+_STORY = re.compile(r"故事|哄我|睡前|讲个笑话|讲个故事|讲讲话|讲个话")
 _NAME = re.compile(r"叫什么|名字|你是谁|哪位")
 _GREET = re.compile(r"^你好[呀啊]?$|早上好|晚上好")
+_STOP = re.compile(r"^(不再|停|停止|别说了|不要说了|闭嘴|算了)[了]?$")
+_SCIENCE_LECTURE = re.compile(r"引力是|基本力|时空弯曲|训练数据|超参数")
 
 
 def is_robotic_reply(text: str) -> bool:
     return bool(_BAD_REPLY.search(text))
 
 
+def is_off_topic_reply(user_text: str, reply: str) -> bool:
+    """User asked persona/capability but LLM lectured on something else."""
+    if not (_CAPABILITY.search(user_text) or _NAME.search(user_text) or _GREET.search(user_text.strip())):
+        return False
+    return bool(_SCIENCE_LECTURE.search(reply) or is_robotic_reply(reply))
+
+
 def persona_reply_for(user_text: str) -> str:
     """Deterministic voice reply when LLM ignores system prompt."""
+    if _STOP.search(user_text.strip()):
+        return "好的。"
     if _NAME.search(user_text):
         return "我叫小揽，是你这边的语音助手。"
     if _CAPABILITY.search(user_text):
         return "我能跟你聊天，还能帮你看情况。"
+    if _STORY.search(user_text):
+        return (
+            "好呀，小狐狸在夜里找星星，走累了靠着月亮睡了。"
+            "风轻轻吹，它梦见彩虹。"
+            "晚安，好梦。"
+        )
     if _GREET.search(user_text.strip()):
         return "你好呀，我是小揽。"
     return "我是小揽，你的语音助手。"
 
 
 def canned_reply_for(user_text: str) -> str | None:
+    if _STOP.search(user_text.strip()):
+        return "好的。"
     if _NAME.search(user_text):
         return "我叫小揽，是你这边的语音助手。"
     if _CAPABILITY.search(user_text):
         return "我能跟你聊天，还能帮你看情况。"
+    if _STORY.search(user_text):
+        return (
+            "好呀，小狐狸在夜里找星星，走累了靠着月亮睡了。"
+            "风轻轻吹，它梦见彩虹。"
+            "晚安，好梦。"
+        )
     if _GREET.search(user_text.strip()):
         return "你好呀，我是小揽。"
     return None
+
+
+def should_skip_llm(user_text: str) -> bool:
+    """Known intents: skip LLM and speak canned reply (saves latency + avoids garbage)."""
+    return canned_reply_for(user_text) is not None
 
 
 def pick_first_sentence(text: str) -> str:
@@ -123,26 +160,35 @@ def pick_first_sentence(text: str) -> str:
     return sents[0] if sents else ""
 
 
-def extract_speak_sentences(text: str, max_cjk: int) -> list[str]:
-    """All complete sentences within a CJK character budget."""
+def extract_speak_sentences(text: str, max_cjk: int = 99999) -> list[str]:
+    """Split on 。！？; include trailing fragment. max_cjk>=9999 means no budget cap."""
     if max_cjk <= 0:
         return []
+    uncapped = max_cjk >= 9999
     out: list[str] = []
     used = 0
+    consumed = 0
     for m in _PRIMARY.finditer(text):
         sent = sanitize_tts_text(m.group(1))
+        consumed = m.end()
         if not is_speakable(sent):
             continue
         n = count_cjk(sent)
-        if used + n > max_cjk:
+        if not uncapped and used + n > max_cjk:
             tail = cap_speak_text(sent, max_cjk - used)
             if tail:
                 out.append(tail)
-            break
+            return out
         out.append(sent)
         used += n
-    if not out:
-        one = cap_speak_text(text, max_cjk)
+    rest = sanitize_tts_text(text[consumed:])
+    if is_speakable(rest):
+        if uncapped:
+            out.append(rest)
+        elif used + count_cjk(rest) <= max_cjk:
+            out.append(cap_speak_text(rest, max_cjk - used))
+    if not out and text.strip():
+        one = cap_speak_text(text, max_cjk if not uncapped else 99999)
         if one:
             out.append(one)
     return out

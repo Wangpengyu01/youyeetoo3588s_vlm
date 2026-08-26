@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -113,30 +114,57 @@ class TtsEngine:
             raise RuntimeError(f"TTS synth failed: {proc.stderr[-400:]}")
         return out
 
-    def play(self, wav_path: Path, *, fast: bool = False) -> None:
+    def play(
+        self,
+        wav_path: Path,
+        *,
+        continuation: bool = False,
+        last_in_utterance: bool = True,
+        utterance_gain: float | None = None,
+    ) -> float | None:
         play_script = VOICE_SCRIPTS / "play_wav.sh"
         env = os.environ.copy()
-        if fast:
+        env["PLAYBACK_AGENT_TTS"] = "1"
+        env.setdefault("PLAYBACK_BUFFER_US", "160000")
+        if continuation:
+            env["PLAYBACK_CONTINUATION"] = "1"
             env["PLAYBACK_WARMUP_SEC"] = "0"
+            env["PLAYBACK_LEAD_MS"] = "0"
+            env["PLAYBACK_FADE_MS"] = "0"
+            env["PLAYBACK_TRIM_MS"] = "0"
+            env["PLAYBACK_FADE_OUT_MS"] = "0"
+        else:
+            env["PLAYBACK_WARMUP_SEC"] = env.get("PLAYBACK_WARMUP_SEC", "0.08")
+            env["PLAYBACK_LEAD_MS"] = env.get("PLAYBACK_LEAD_MS", "80")
+            env["PLAYBACK_FADE_MS"] = env.get("PLAYBACK_FADE_MS", "12")
+            env["PLAYBACK_FADE_OUT_MS"] = env.get("PLAYBACK_FADE_OUT_MS", "20")
+        if not last_in_utterance:
             env["VOICE_RESTORE_MIC"] = "0"
+        if utterance_gain is not None:
+            env["PLAYBACK_FIXED_GAIN"] = f"{utterance_gain:.4f}"
         with self._play_lock:
             self._play_stopped = False
             self._play_proc = subprocess.Popen(
                 ["bash", str(play_script), str(wav_path)],
                 env=env,
                 start_new_session=True,
+                stderr=subprocess.PIPE,
+                text=True,
             )
             proc = self._play_proc
         assert proc is not None
-        rc = proc.wait()
+        _, stderr = proc.communicate()
+        rc = proc.returncode
         with self._play_lock:
             self._play_proc = None
             stopped = self._play_stopped
         if stopped:
             LOG.info("[tts] playback stopped (barge-in)")
-            return
+            return None
         if rc != 0:
-            raise RuntimeError(f"play_wav exited {rc}")
+            raise RuntimeError(f"play_wav exited {rc}: {stderr[-400:]}")
+        m = re.search(r"gain=([\d.]+)", stderr)
+        return float(m.group(1)) if m else None
 
     def stop_playback(self) -> None:
         with self._play_lock:
@@ -160,4 +188,4 @@ class TtsEngine:
     def speak(self, text: str) -> None:
         LOG.info("[tts] speak: %s", text[:80])
         wav = self.synthesize(text)
-        self.play(wav, fast=False)
+        self.play(wav, last_in_utterance=True)

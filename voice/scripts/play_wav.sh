@@ -6,12 +6,14 @@ MODE="${2:-}"
 
 source /userdata/voice/scripts/voice_env.sh
 
-# Route playback only — do NOT touch mic before aplay (codec switch eats first syllable)
-bash /userdata/voice/scripts/speaker_setup.sh >/dev/null
-
-WARMUP="${PLAYBACK_WARMUP_SEC:-0.12}"
-if awk "BEGIN{exit !(${WARMUP} > 0)}"; then
-  sleep "${WARMUP}"
+CONT="${PLAYBACK_CONTINUATION:-0}"
+if [ "${CONT}" != "1" ]; then
+  # Route playback only — do NOT touch mic before aplay (codec switch eats first syllable)
+  bash /userdata/voice/scripts/speaker_setup.sh >/dev/null
+  WARMUP="${PLAYBACK_WARMUP_SEC:-0.12}"
+  if awk "BEGIN{exit !(${WARMUP} > 0)}"; then
+    sleep "${WARMUP}"
+  fi
 fi
 
 PLAY=/tmp/play_16k.wav
@@ -34,6 +36,25 @@ echo "[play] ▶ ${WAV} (${MODE:-normal})" >&2
 APLAY_OPTS=()
 if [ -n "${PLAYBACK_BUFFER_US:-80000}" ]; then
   APLAY_OPTS+=(--buffer-time="${PLAYBACK_BUFFER_US}")
+fi
+# Agent TTS: one continuous play — do not poke amixer during aplay (causes pops).
+if [ "${PLAYBACK_AGENT_TTS:-0}" = "1" ] || [ "${PLAYBACK_CONTINUATION:-0}" = "1" ]; then
+  run_aplay() {
+    if ! command -v pasuspender >/dev/null 2>&1; then
+      aplay -D plughw:0,0 "${APLAY_OPTS[@]}" "${PLAY}"
+    else
+      pasuspender -- aplay -D plughw:0,0 "${APLAY_OPTS[@]}" "${PLAY}"
+    fi
+  }
+  if ! run_aplay; then
+    echo "[play] aplay failed" >&2
+    exit 1
+  fi
+  if [ "${VOICE_RESTORE_MIC:-1}" = "1" ]; then
+    bash /userdata/voice/scripts/mic_setup.sh >/dev/null 2>&1 || true
+  fi
+  echo "[play] 完成" >&2
+  exit 0
 fi
 
 # PulseAudio can clear Headphone/Speaker switches during direct ALSA playback.
@@ -75,7 +96,9 @@ if ! run_aplay; then
     if run_aplay; then
       kill "${GUARD_PID}" 2>/dev/null || true
       wait "${GUARD_PID}" 2>/dev/null || true
-      bash /userdata/voice/scripts/speaker_setup.sh >/dev/null
+      if [ "${CONT}" != "1" ]; then
+        bash /userdata/voice/scripts/speaker_setup.sh >/dev/null
+      fi
       if [ "${VOICE_RESTORE_MIC:-1}" = "1" ]; then
         bash /userdata/voice/scripts/mic_setup.sh >/dev/null 2>&1 || true
       fi
@@ -89,7 +112,9 @@ fi
 
 kill "${GUARD_PID}" 2>/dev/null || true
 wait "${GUARD_PID}" 2>/dev/null || true
-bash /userdata/voice/scripts/speaker_setup.sh >/dev/null
+if [ "${CONT}" != "1" ]; then
+  bash /userdata/voice/scripts/speaker_setup.sh >/dev/null
+fi
 
 if [ "${VOICE_RESTORE_MIC:-1}" = "1" ]; then
   bash /userdata/voice/scripts/mic_setup.sh >/dev/null 2>&1 || true

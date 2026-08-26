@@ -24,12 +24,13 @@ from orchestrator.config_loader import load_yaml
 from orchestrator.events import AgentState
 from tts.sentence_split import (
     canned_reply_for,
-    cap_speak_text,
-    count_cjk,
-    drain_complete_sentences,
     extract_speak_sentences,
+    is_off_topic_reply,
     is_robotic_reply,
+    is_speakable,
     persona_reply_for,
+    sanitize_tts_text,
+    should_skip_llm,
 )
 from tts.tts_engine import TtsConfig, TtsEngine
 from tts.tts_queue import TtsQueue
@@ -86,8 +87,13 @@ class Orchestrator:
             max_speech_duration=float(vad_cfg.get("max_speech_duration", 30.0)),
             alsa_device=str(vad_cfg.get("alsa_device", "plughw:0,0")),
             min_segment_sec=float(vad_cfg.get("min_segment_sec", 0.5)),
+            speech_preroll_ms=int(vad_cfg.get("speech_preroll_ms", 400)),
+            arecord_period_size=int(vad_cfg.get("arecord_period_size", 320)),
+            arecord_buffer_size=int(vad_cfg.get("arecord_buffer_size", 2560)),
+            mic_capture_gain=int(vad_cfg.get("mic_capture_gain", 6)),
         )
-        self.listen_cooldown_sec = float(vad_cfg.get("listen_cooldown_sec", 0.8))
+        self.listen_cooldown_sec = float(vad_cfg.get("listen_cooldown_sec", 0.5))
+        self.listen_cooldown_skip_max_sec = float(vad_cfg.get("listen_cooldown_skip_max_sec", 0.45))
 
         utterance = paths.get("utterance_wav", str(agent_root / "run" / "last_utterance.wav"))
         asr_backend = str(asr_cfg.get("backend", "sense_voice")).strip().lower()
@@ -132,12 +138,13 @@ class Orchestrator:
                 max_partials_per_utterance=int(asr_cfg.get("max_partials_per_utterance", 3)),
                 min_duration_sec=self.vad_config.min_segment_sec,
                 utterance_wav=utterance,
+                clip_peak_threshold=int(asr_cfg.get("clip_peak_threshold", 30000)),
+                clip_limit_ceiling=float(asr_cfg.get("clip_limit_ceiling", 0.85)),
             )
         )
 
         self.socket_path = cfg.get("socket_path", "/tmp/r1-llm.sock")
         self.max_new_tokens = int(cfg.get("max_new_tokens", 64))
-        self.max_speak_chars = int(tts_cfg.get("max_speak_chars", 100))
         self.system_prompt = (cfg.get("system_prompt") or "").strip()
         self.vad_stream = VadStream(self.vad_config, self.vad_queue)
         self.tts_queue = TtsQueue(
@@ -253,8 +260,12 @@ class Orchestrator:
                 if self._turn_busy and not self._speaking:
                     LOG.info("[vad] busy ASR/LLM, drop %.2fs segment", duration)
                     continue
-                if not self._speaking and time.monotonic() < self._listen_cooldown_until:
-                    LOG.info("[vad] post-tts cooldown, skip %.2fs segment", duration)
+                if (
+                    not self._speaking
+                    and time.monotonic() < self._listen_cooldown_until
+                    and duration < self.listen_cooldown_skip_max_sec
+                ):
+                    LOG.info("[vad] post-tts cooldown, skip short %.2fs segment", duration)
                     continue
                 if self.barge_in_enabled and self._speaking:
                     if duration < self.barge_in_min_sec:
@@ -292,52 +303,64 @@ class Orchestrator:
     async def _enqueue_speak(self, text: str, tts_state: dict[str, int | bool]) -> bool:
         if self._tts_abort:
             return False
-        remaining = self.max_speak_chars - int(tts_state["cjk"])
-        speak = cap_speak_text(text, remaining)
-        if not speak:
+        speak = sanitize_tts_text(text)
+        if not is_speakable(speak):
             return False
         tts_state["n"] = int(tts_state["n"]) + 1
-        tts_state["cjk"] = int(tts_state["cjk"]) + count_cjk(speak)
         LOG.info("[event] tts_sentence: %s", speak[:60])
         await self.emit({"type": "tts_sentence", "text": speak})
         await self.tts_queue.enqueue(speak)
         return True
 
+    async def _speak_extracted(self, full: str, *, canned: bool = False) -> None:
+        """Enqueue every complete sentence in full — no char/sentence cap."""
+        tts_state: dict[str, int | bool] = {"n": 0, "canned": canned}
+        sents = extract_speak_sentences(full, max_cjk=99999)
+        if not sents:
+            return
+        LOG.info("[tts] speak plan: %d sentence(s)", len(sents))
+        for sent in sents:
+            if not await self._enqueue_speak(sent, tts_state):
+                break
+        if int(tts_state["n"]) <= 0 or self._tts_abort:
+            return
+        self.set_state(AgentState.TTS)
+        self._speaking = True
+        try:
+            await self.tts_queue.wait_done()
+        finally:
+            self._speaking = False
+        if not self._tts_abort:
+            self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
+        lat = self.tts_queue.first_play_latency_s
+        if lat is not None:
+            LOG.info("[tts] utterance first_play=%.2fs (target <4s)", lat)
+
+    async def _speak_turn(self, text: str) -> None:
+        await self._speak_extracted(text, canned=True)
+
     async def _run_llm(self, prompt: str) -> None:
         user_prompt = prompt
         self.set_state(AgentState.LLM)
+
+        if should_skip_llm(user_prompt):
+            speak = canned_reply_for(user_prompt) or persona_reply_for(user_prompt)
+            LOG.info("[llm] fast-path (skip LLM): %s", speak[:48])
+            await self._speak_turn(speak)
+            return
+
         await asyncio.to_thread(llm_clear_history, self.socket_path)
         if self.system_prompt:
             prompt = f"{self.system_prompt}\n\n用户：{prompt}\n小揽："
-        LOG.info("[llm] prompt %d chars · user=%s", len(prompt), user_prompt[:48])
+        LOG.info(
+            "[llm] prompt %d chars (system=%d) · user=%s",
+            len(prompt),
+            len(self.system_prompt),
+            user_prompt[:48],
+        )
         buffer = {"text": ""}
         turn_tainted = {"v": False}
-        tts_state: dict[str, int | bool] = {"n": 0, "cjk": 0, "canned": False}
         loop = asyncio.get_running_loop()
-
-        def _enqueue_tts(sent: str) -> None:
-            if self._tts_abort or turn_tainted["v"] or int(tts_state["cjk"]) >= self.max_speak_chars:
-                return
-            speak = sent
-            if is_robotic_reply(speak):
-                canned = canned_reply_for(user_prompt)
-                if not canned:
-                    turn_tainted["v"] = True
-                    return
-                speak = canned
-                tts_state["canned"] = True
-            remaining = self.max_speak_chars - int(tts_state["cjk"])
-            speak = cap_speak_text(speak, remaining)
-            if not speak:
-                return
-            tts_state["n"] = int(tts_state["n"]) + 1
-            tts_state["cjk"] = int(tts_state["cjk"]) + count_cjk(speak)
-            LOG.info("[event] tts_sentence: %s", speak[:60])
-            asyncio.run_coroutine_threadsafe(
-                self.emit({"type": "tts_sentence", "text": speak}),
-                loop,
-            )
-            asyncio.run_coroutine_threadsafe(self.tts_queue.enqueue(speak), loop)
 
         def on_token(piece: str) -> None:
             if self._tts_abort:
@@ -349,13 +372,6 @@ class Orchestrator:
                 self.emit({"type": "llm_token", "text": piece}),
                 loop,
             )
-            if turn_tainted["v"]:
-                return
-            complete, buffer["text"] = drain_complete_sentences(buffer["text"])
-            for sent in complete:
-                _enqueue_tts(sent)
-                if int(tts_state["cjk"]) >= self.max_speak_chars:
-                    break
 
         try:
             reply = await asyncio.to_thread(
@@ -366,37 +382,25 @@ class Orchestrator:
                 max_new_tokens=self.max_new_tokens,
             )
             full = reply["text"]
-            if not self._tts_abort and (turn_tainted["v"] or is_robotic_reply(full)):
+            need_fallback = (
+                turn_tainted["v"]
+                or is_robotic_reply(full)
+                or is_off_topic_reply(user_prompt, full)
+            )
+            if not self._tts_abort and need_fallback:
                 await self.tts_queue.discard_pending()
-                tts_state = {"n": 0, "cjk": 0, "canned": True}
                 speak = persona_reply_for(user_prompt)
                 LOG.info("[llm] persona fallback: %s", speak[:48])
-                await self._enqueue_speak(speak, tts_state)
-            elif int(tts_state["n"]) == 0 and not self._tts_abort:
-                for sent in extract_speak_sentences(full, self.max_speak_chars):
-                    if not await self._enqueue_speak(sent, tts_state):
-                        break
-                    if int(tts_state["cjk"]) >= self.max_speak_chars:
-                        break
+                await self._speak_extracted(speak, canned=True)
+            elif not self._tts_abort:
+                await self._speak_extracted(full, canned=False)
             LOG.info(
                 "[llm] reply (%d chars, ttft=%.3fs): %s",
                 len(full),
                 reply.get("ttft_s") or 0,
                 full[:120],
             )
-            if int(tts_state["n"]) > 0 and not self._tts_abort:
-                self.set_state(AgentState.TTS)
-                self._speaking = True
-                try:
-                    await self.tts_queue.wait_done()
-                finally:
-                    self._speaking = False
-                if not self._tts_abort:
-                    self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
-                lat = self.tts_queue.first_play_latency_s
-                if lat is not None:
-                    LOG.info("[tts] utterance first_play=%.2fs (target <4s)", lat)
-            elif self._tts_abort:
+            if self._tts_abort:
                 LOG.info("[barge-in] skipped post-abort cooldown")
         except OSError as exc:
             LOG.error("[llm] request failed: %s", exc)
@@ -408,7 +412,13 @@ class Orchestrator:
         self.ping_llm_daemon()
         await self.tts_queue.start()
         if self.api_enabled:
-            await run_ws_server(self.event_bus, self.api_host, self.api_port)
+            try:
+                await run_ws_server(self.event_bus, self.api_host, self.api_port)
+            except OSError as exc:
+                LOG.warning(
+                    "[api] WebSocket bind failed (%s) — voice pipeline continues without WS",
+                    exc,
+                )
         await asyncio.gather(
             self.run_vad_loop(inject_wav),
             self.handle_events(),

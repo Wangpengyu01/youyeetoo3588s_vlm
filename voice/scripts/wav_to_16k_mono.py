@@ -80,6 +80,19 @@ def prepend_lead(samples, rate=16000, lead_ms=120, fade_ms=10):
     return out
 
 
+def append_fade_out(samples, rate=16000, fade_ms=15):
+    """Short fade-out so chunk boundaries do not click/pop."""
+    fade_n = min(int(rate * fade_ms / 1000), len(samples))
+    if fade_n <= 1:
+        return samples
+    out = samples[:-fade_n]
+    start = len(samples) - fade_n
+    for i in range(fade_n):
+        factor = 1.0 - (i + 1) / fade_n
+        out.append(int(samples[start + i] * factor))
+    return out
+
+
 def write_wav(path, samples, rate=16000, channels=1):
     with wave.open(path, "wb") as w:
         w.setnchannels(channels)
@@ -108,24 +121,42 @@ def auto_gain(samples, target_peak=26000, max_gain=6.0):
 def main():
     src, dst = sys.argv[1], sys.argv[2]
     monitor = os.environ.get("PLAYBACK_MODE") == "monitor"
+    continuation = os.environ.get("PLAYBACK_CONTINUATION") == "1"
     fixed_gain = float(os.environ.get("PLAYBACK_GAIN", "4.5"))
+    utterance_gain = os.environ.get("PLAYBACK_FIXED_GAIN")
     target_peak = int(os.environ.get("PLAYBACK_TARGET_PEAK", "26000"))
     max_gain = float(os.environ.get("PLAYBACK_MAX_GAIN", "8.0"))
     lead_ms = int(os.environ.get("PLAYBACK_LEAD_MS", "120"))
     fade_ms = int(os.environ.get("PLAYBACK_FADE_MS", "10"))
+    fade_out_ms = int(os.environ.get("PLAYBACK_FADE_OUT_MS", "15"))
     trim_ms = int(os.environ.get("PLAYBACK_TRIM_MS", "60"))
     channels = int(os.environ.get("PLAYBACK_CHANNELS", "1"))
     out_rate = int(os.environ.get("PLAYBACK_RATE", "16000"))
+    if continuation:
+        lead_ms = int(os.environ.get("PLAYBACK_LEAD_MS", "18"))
+        fade_ms = int(os.environ.get("PLAYBACK_FADE_MS", "8"))
+        trim_ms = int(os.environ.get("PLAYBACK_TRIM_MS", "0"))
     rate, samples = read_wav(src)
     samples = resample(rate, samples, out_rate)
-    if not monitor:
+    if not monitor and trim_ms > 0:
         samples = trim_leading_silence(samples, rate=out_rate, max_ms=trim_ms)
     if monitor:
-        samples, gain = auto_gain(
-            samples,
-            target_peak=target_peak,
-            max_gain=float(os.environ.get("REPLAY_MONITOR_GAIN", "8.0")),
-        )
+        src_peak = max((abs(s) for s in samples), default=0)
+        if src_peak >= 28000:
+            gain = 1.0
+            print(
+                f"[play] clipped source peak={src_peak}; monitor gain=1.0 (no boost)",
+                file=sys.stderr,
+            )
+        else:
+            samples, gain = auto_gain(
+                samples,
+                target_peak=target_peak,
+                max_gain=float(os.environ.get("REPLAY_MONITOR_GAIN", "8.0")),
+            )
+    elif utterance_gain:
+        gain = float(utterance_gain)
+        samples = apply_gain(samples, gain)
     elif os.environ.get("PLAYBACK_NORMALIZE", "1") == "1":
         samples, gain = auto_gain(
             samples,
@@ -135,7 +166,9 @@ def main():
     else:
         samples = apply_gain(samples, fixed_gain)
         gain = fixed_gain
-    samples = prepend_lead(samples, rate=out_rate, lead_ms=lead_ms, fade_ms=fade_ms)
+    samples = append_fade_out(samples, rate=out_rate, fade_ms=fade_out_ms)
+    if lead_ms > 0 or fade_ms > 0:
+        samples = prepend_lead(samples, rate=out_rate, lead_ms=lead_ms, fade_ms=fade_ms)
     if channels >= 2:
         samples = to_stereo(samples)
         channels = 2

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=HDMI only display
+Comment=Disable unused DSI output on R1
+Exec=/userdata/agent/scripts/display_hdmi_only.sh
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

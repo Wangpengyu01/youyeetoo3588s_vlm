@@ -3,14 +3,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-from asr.audio_util import int16_bytes_to_float32, read_wav_float32
+from asr.audio_util import collect_stream_prefix, int16_bytes_to_float32, read_wav_float32
 from asr.mic_capture import arm_mic, mic_route_guard, open_arecord
 from asr.sherpa_vad import SherpaVad, SherpaVadError
 
 LOG = logging.getLogger(__name__)
+
+
+@dataclass
+class _StreamChunk:
+    start: int
+    samples: list[float]
 
 
 @dataclass
@@ -25,10 +32,18 @@ class VadConfig:
     max_speech_duration: float = 30.0
     alsa_device: str = "plughw:0,0"
     min_segment_sec: float = 0.5
+    speech_preroll_ms: int = 400
+    arecord_period_size: int = 320
+    arecord_buffer_size: int = 2560
+    mic_capture_gain: int = 6
 
     @property
     def chunk_samples(self) -> int:
         return int(self.sample_rate * self.chunk_ms / 1000)
+
+    @property
+    def preroll_samples(self) -> int:
+        return int(self.sample_rate * self.speech_preroll_ms / 1000)
 
 
 class VadStream:
@@ -38,15 +53,47 @@ class VadStream:
         self.cfg = cfg
         self.queue = queue
         self._stop = asyncio.Event()
+        self._history: deque[_StreamChunk] = deque()
+        self._stream_total = 0
+        keep_sec = max(30.0, cfg.max_speech_duration + 5.0)
+        self._history_keep = cfg.preroll_samples + int(cfg.sample_rate * keep_sec)
+
+    def _append_stream(self, samples: list[float]) -> None:
+        if not samples:
+            return
+        self._history.append(_StreamChunk(self._stream_total, samples))
+        self._stream_total += len(samples)
+        min_start = max(0, self._stream_total - self._history_keep)
+        while len(self._history) > 1:
+            first = self._history[0]
+            if first.start + len(first.samples) <= min_start:
+                self._history.popleft()
+            else:
+                break
+
+    def _prefix_before(self, end_index: int) -> list[float]:
+        chunks = [(c.start, c.samples) for c in self._history]
+        return collect_stream_prefix(
+            chunks,
+            end_index,
+            max_samples=self.cfg.preroll_samples,
+        )
 
     def stop(self) -> None:
         self._stop.set()
 
     async def run_live(self) -> None:
-        arm_mic()
+        arm_mic(mic_gain=self.cfg.mic_capture_gain)
         guard_stop = asyncio.Event()
-        guard_task = asyncio.create_task(mic_route_guard(guard_stop))
-        proc = await open_arecord(device=self.cfg.alsa_device, sample_rate=self.cfg.sample_rate)
+        guard_task = asyncio.create_task(
+            mic_route_guard(guard_stop, mic_gain=self.cfg.mic_capture_gain)
+        )
+        proc = await open_arecord(
+            device=self.cfg.alsa_device,
+            sample_rate=self.cfg.sample_rate,
+            period_size=self.cfg.arecord_period_size,
+            buffer_size=self.cfg.arecord_buffer_size,
+        )
         try:
             await self._consume_arecord(proc)
         finally:
@@ -73,9 +120,11 @@ class VadStream:
             for i in range(0, len(samples), chunk):
                 if self._stop.is_set():
                     break
-                vad.accept_pcm_float32(samples[i : i + chunk])
+                part = samples[i : i + chunk]
+                self._append_stream(part)
+                vad.accept_pcm_float32(part)
                 if vad.is_speech_detected:
-                    await self.queue.put({"type": "audio_chunk", "samples": samples[i : i + chunk]})
+                    await self.queue.put({"type": "audio_chunk", "samples": part})
                 await self._emit(vad.poll_segments())
                 await asyncio.sleep(self.cfg.chunk_ms / 1000.0)
             vad.flush()
@@ -103,6 +152,7 @@ class VadStream:
                             LOG.error("[vad] arecord ended: %s", err.decode(errors="replace"))
                         break
                     floats = int16_bytes_to_float32(raw)
+                    self._append_stream(floats)
                     vad.accept_pcm_float32(floats)
                     if vad.is_speech_detected:
                         await self.queue.put({"type": "audio_chunk", "samples": floats})
@@ -118,14 +168,24 @@ class VadStream:
             elif kind == "speech_end":
                 await self.queue.put({"type": "speech_end"})
             elif kind == "segment" and payload is not None:
-                if payload.duration_sec < self.cfg.min_segment_sec:
-                    LOG.debug("[vad] drop short segment %.2fs", payload.duration_sec)
+                prefix = self._prefix_before(payload.start)
+                segment = prefix + list(payload.samples)
+                duration_sec = len(segment) / self.cfg.sample_rate
+                if duration_sec < self.cfg.min_segment_sec:
+                    LOG.debug("[vad] drop short segment %.2fs", duration_sec)
                     continue
+                if prefix:
+                    LOG.info(
+                        "[vad] prefix +%.0fms (start=%d) · utterance %.2fs",
+                        1000 * len(prefix) / self.cfg.sample_rate,
+                        payload.start,
+                        duration_sec,
+                    )
                 await self.queue.put(
                     {
                         "type": "audio_segment",
-                        "samples": payload.samples,
-                        "duration_sec": payload.duration_sec,
+                        "samples": segment,
+                        "duration_sec": duration_sec,
                         "start": payload.start,
                     }
                 )

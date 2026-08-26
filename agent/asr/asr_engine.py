@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
-from asr.audio_util import float32_to_int16_bytes, write_wav_int16
+from asr.audio_util import (
+    clipped_sample_ratio,
+    float32_peak_int16,
+    float32_to_int16_bytes,
+    limit_peak_float32,
+    write_wav_int16,
+)
 from asr.sense_voice import SenseVoiceAsr, SenseVoiceConfig
 from asr.sherpa_streaming_asr import StreamingParaformerConfig, StreamingParaformerRecognizer
 
@@ -38,6 +44,8 @@ class AsrEngineConfig:
     max_partials_per_utterance: int = 3
     min_duration_sec: float = 0.5
     utterance_wav: str = "/userdata/agent/run/last_utterance.wav"
+    clip_peak_threshold: int = 30000
+    clip_limit_ceiling: float = 0.85
 
 
 class _SenseVoiceBackend:
@@ -169,7 +177,22 @@ class StreamingAsrSession:
             await asyncio.to_thread(self.engine._backend_impl.reset)
             return result
 
-        pcm = float32_to_int16_bytes(self._buffer)
+        pcm_buf = list(self._buffer)
+        peak_i16 = float32_peak_int16(pcm_buf)
+        clip_ratio = clipped_sample_ratio(pcm_buf, threshold=cfg.clip_peak_threshold)
+        if peak_i16 >= cfg.clip_peak_threshold:
+            pcm_buf, gain, peak_i16 = limit_peak_float32(
+                pcm_buf,
+                ceiling=cfg.clip_limit_ceiling,
+            )
+            LOG.warning(
+                "[asr] clipped capture peak=%d (%.1f%% samples) · limit gain=%.2f — "
+                "lower mic gain or speak slightly farther from mic",
+                peak_i16,
+                100.0 * clip_ratio,
+                gain,
+            )
+        pcm = float32_to_int16_bytes(pcm_buf)
         self.engine.utterance_path.parent.mkdir(parents=True, exist_ok=True)
         write_wav_int16(self.engine.utterance_path, pcm, sample_rate=cfg.sample_rate)
         LOG.info("[asr] saved utterance %.2fs -> %s", duration, self.engine.utterance_path)
@@ -179,7 +202,7 @@ class StreamingAsrSession:
         if isinstance(impl, _SenseVoiceBackend):
             text = await asyncio.to_thread(
                 impl.recognizer.recognize_samples,
-                self._buffer,
+                pcm_buf,
                 cfg.sample_rate,
                 boost=True,
                 wav_path=self.engine.utterance_path,
@@ -187,7 +210,7 @@ class StreamingAsrSession:
         else:
             text = await asyncio.to_thread(
                 impl.finalize,
-                self._buffer,
+                pcm_buf,
                 cfg.sample_rate,
             )
         asr_ms = int((time.monotonic() - t0) * 1000)

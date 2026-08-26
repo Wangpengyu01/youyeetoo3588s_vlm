@@ -9,13 +9,6 @@ system_prompt: |
   - 用户问名字时只答：我叫小揽
   - 根据问题复杂度自行控制长短：问候或简单问题一两句即可，复杂问题最多三句
   - 全文不超过一百个汉字，说完即止，不要铺垫、不要列举
-  示例：
-  用户：你都会做什么事情
-  小揽：我能跟你聊天，还能帮你看情况。
-  用户：你叫什么名字
-  小揽：我叫小揽。
-  用户：你好
-  小揽：你好呀，我是小揽。
 max_new_tokens: 72
 socket_path: /tmp/r1-llm.sock
 
@@ -26,11 +19,16 @@ vad:
   chunk_ms: 100
   threshold: 0.5
   min_silence_duration: 0.4
-  min_speech_duration: 0.25
+  min_speech_duration: 0.20
   max_speech_duration: 30.0
   min_segment_sec: 0.5
-  listen_cooldown_sec: 0.8
+  speech_preroll_ms: 450
+  listen_cooldown_sec: 0.5
+  listen_cooldown_skip_max_sec: 0.45
   alsa_device: plughw:0,0
+  arecord_period_size: 320
+  arecord_buffer_size: 2560
+  mic_capture_gain: 6
 
 barge_in:
   enabled: true
@@ -52,6 +50,8 @@ asr:
   partial_min_sec: 0.6
   partial_enabled: true
   max_partials_per_utterance: 5
+  clip_peak_threshold: 30000
+  clip_limit_ceiling: 0.85
   # fallback sense_voice:
   # backend: sense_voice
   # model_dir: /userdata/voice/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17
@@ -68,7 +68,7 @@ tts:
   speed: 1.0
   max_chars: 80
   merge_max_chars: 40
-  max_speak_chars: 100
+  max_chars: 80
 
 api:
   enabled: true

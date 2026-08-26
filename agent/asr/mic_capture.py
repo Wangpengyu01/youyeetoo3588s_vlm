@@ -10,7 +10,7 @@ from pathlib import Path
 VOICE_SCRIPTS = Path(os.environ.get("VOICE_SCRIPTS", "/userdata/voice/scripts"))
 
 
-def arm_mic(*, retries: int = 2) -> None:
+def arm_mic(*, retries: int = 2, mic_gain: int | None = None) -> None:
     """Lock ES8388 mic route; retry once like voice/scripts/asr.sh."""
     script = VOICE_SCRIPTS / "mic_arm.sh"
     hw = VOICE_SCRIPTS / "voice_hw_board.sh"
@@ -28,6 +28,11 @@ def arm_mic(*, retries: int = 2) -> None:
                 val = val.strip().strip('"').strip("'")
                 if key and key not in env:
                     env[key] = val
+    if mic_gain is not None:
+        env["MIC_CAPTURE_GAIN"] = str(mic_gain)
+    route = env.get("MIC_ROUTE") or env.get("ROUTE") or "main_board"
+    env["MIC_ROUTE"] = route
+    env["ROUTE"] = route
     last_err: Exception | None = None
     for attempt in range(1, retries + 1):
         proc = subprocess.run(
@@ -47,16 +52,23 @@ def arm_mic(*, retries: int = 2) -> None:
     raise last_err
 
 
-def setup_mic() -> None:
+def setup_mic(mic_gain: int | None = None) -> None:
     script = VOICE_SCRIPTS / "mic_setup.sh"
     if script.is_file():
-        subprocess.run(["bash", str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        env = os.environ.copy()
+        if mic_gain is not None:
+            env["MIC_CAPTURE_GAIN"] = str(mic_gain)
+        subprocess.run(["bash", str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
 
 
-async def mic_route_guard(stop: asyncio.Event, interval: float = 0.08) -> None:
+async def mic_route_guard(
+    stop: asyncio.Event,
+    interval: float = 0.08,
+    mic_gain: int | None = None,
+) -> None:
     """Keep ES8388 mic route locked while recording (same idea as mic_record.sh)."""
     while not stop.is_set():
-        setup_mic()
+        setup_mic(mic_gain)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except asyncio.TimeoutError:
@@ -68,7 +80,10 @@ async def open_arecord(
     device: str = "plughw:0,0",
     sample_rate: int = 16000,
     channels: int = 1,
+    period_size: int = 320,
+    buffer_size: int = 2560,
 ) -> asyncio.subprocess.Process:
+    # Larger ALSA buffer reduces underrun gaps when the asyncio loop stalls briefly.
     return await asyncio.create_subprocess_exec(
         "arecord",
         "-q",
@@ -80,6 +95,10 @@ async def open_arecord(
         str(sample_rate),
         "-c",
         str(channels),
+        "--period-size",
+        str(period_size),
+        "--buffer-size",
+        str(buffer_size),
         "-t",
         "raw",
         stdout=asyncio.subprocess.PIPE,

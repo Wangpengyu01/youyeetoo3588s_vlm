@@ -23,3 +23,7 @@ elif peak < 1000:
         print("VERDICT: VERY_QUIET - increase mic gain or check routing")
 else:
     print("VERDICT: SIGNAL_OK - mic hardware capturing audio")
+if peak >= 32000:
+    print("VERDICT: CLIPPED - peak hit digital max; lower MIC_CAPTURE_GAIN or move back from mic")
+elif peak >= 25000:
+    print("VERDICT: HOT - near clipping; consider mic gain 6 instead of 8")
