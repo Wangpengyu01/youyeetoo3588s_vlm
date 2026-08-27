@@ -2,7 +2,22 @@
 
 youyeetoo R1（RK3588S）+ RM1828（RK1828）端侧对话智能体。
 
-**当前阶段：** Phase A–E ✅ · Phase F 流式 Paraformer ASR 进行中 · Matcha TTS 已上线
+**当前阶段：** Phase A–E ✅ · Phase F 流式 Paraformer ASR ✅ · Matcha TTS ✅ · HDMI 桌面 GUI ✅
+
+## 桌面 GUI 与自启
+
+| 项 | 路径 / 端口 |
+|----|-------------|
+| 控制面板 | `agent/ui/index.html` · HTTP **8766** · Chromium 全屏 |
+| WebSocket 状态 | `ws://127.0.0.1:8765/ws` |
+| 桌面图标 | `~/Desktop/小揽语音助手.desktop` |
+| 登录自启 GUI | `~/.config/autostart/xiaolan-gui-autostart.desktop` |
+| 语音服务自启 | `r1-llm-daemon` + `r1-orchestrator`（systemd） |
+| 科技风壁纸 | `/userdata/agent/ui/wallpaper.svg` |
+| 一键安装 | `sudo bash /userdata/agent/scripts/install_autostart.sh` |
+| 打开 GUI | 双击桌面图标 · 或 `bash /userdata/agent/scripts/open_agent_gui.sh` |
+
+PC 推送：`powershell -File agent/scripts/push_agent.ps1`
 
 ## 与现有代码的关系
 
@@ -32,7 +47,8 @@ agent/
 ├── tts/             # 分句 TTS / 播放队列
 ├── vision/          # see() · RTSP 最新帧 · VLM 调度
 ├── proto/           # IPC 消息定义（JSON Lines / Unix socket）
-└── scripts/         # 部署与板端启动
+├── ui/              # HDMI 控制面板（Chromium 全屏 · WS 8765）
+└── scripts/         # 部署 · systemd · 桌面自启 · 壁纸
 ```
 
 ## 快速链接

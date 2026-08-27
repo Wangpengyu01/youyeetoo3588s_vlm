@@ -48,7 +48,7 @@ v1 在 R1 上交付 **Ollama 式 LLM 常驻服务 + 流式语音对话**：3588 
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | `max_context_len` | **1024** | 与 P3 session_test 一致 |
-| `max_new_tokens` | **72** | 控制生成时长 · ≈100 汉字 · 可 IPC 覆盖 |
+| `max_new_tokens` | **144** | orchestrator 默认 · 可 IPC 覆盖 · ≈200 汉字 |
 | `core_mask` | **0xff** | 1828 全核 |
 | `keep_history` | **1** | 多轮 KV cache |
 | `max_history_turns` | **8–10** | 超出滑动截断 |
@@ -96,15 +96,15 @@ rknn3_session_test \
 - [x] **VAD** — 始终监听 + 端点检测
 - [x] **ASR** — 3588 CPU · sherpa-onnx 本地（Phase F：streaming Paraformer · SenseVoice fallback）
 - [x] **分句 TTS** — 3588 CPU · **Matcha zh-baker** · 22kHz · 应用层流水线播放
-- [x] **agent.yaml** — system_prompt / 人设 · ≤100 字 · 无需微调
+- [x] **agent.yaml** — system_prompt / 人设 · persona 兜底 · ≤200 字
 - [x] **TTS barge-in（阶段 A）** — 播放中可打断 · Phase G
-- [x] **agent_api** — HTTP/WebSocket 占位（HDMI 触屏后排）
+- [x] **agent_api** — HTTP/WebSocket · HDMI 控制面板已接入
+- [x] **HDMI 桌面 GUI** — Chromium 全屏 · 登录自启 · 科技风壁纸 · 桌面图标
 
 ### 不包含（v1）
 
 - [ ] `see()` / RTSP 看图进对话
 - [ ] 统一 `vlm_daemon`（待 spike 通过后 P5b）
-- [ ] HDMI 触屏 UI 实现
 - [ ] 唤醒词 · LLM barge-in（Phase G-b）· 模型微调
 
 ---
@@ -288,4 +288,21 @@ bash /userdata/agent/scripts/agent_chat.sh
 | draft-0 | 2026-08-26 | 初始化骨架 |
 | **v1.0** | **2026-08-26** | 锁定模型规格 · 决策 D1–D7 · v1+spike→P5b 路径 |
 | **v1.1** | **2026-08-26** | Matcha TTS 上线 · Phase F streaming Paraformer ASR 进行中 |
-| **v1.2** | **2026-08-26** | Phase G：≤100 字长度控制 · TTS barge-in 阶段 A |
+| **v1.2** | **2026-08-26** | Phase G：≤200 字 · persona 兜底 · TTS barge-in |
+| **v1.3** | **2026-08-27** | HDMI 桌面 GUI · systemd 自启 · 科技风壁纸 · 大屏布局优化 |
+
+---
+
+## 8. HDMI 桌面产品化
+
+| 组件 | 说明 |
+|------|------|
+| `agent/ui/index.html` | 全屏控制面板 · WS 订阅 state/ASR/LLM/TTS · 右上角退出 |
+| `open_agent_gui.sh` | Chromium `--start-fullscreen` · 本地 HTTP :8766 |
+| `autostart_agent_gui.sh` | 登录后等待 gnome-shell → 打开 GUI |
+| `install_autostart.sh` | systemd 语音服务 + 桌面图标 + 壁纸 + GUI 自启 |
+| `set_tech_wallpaper.sh` | `wallpaper.svg` 科技风背景 |
+| `scale_desktop_icons.sh` | 桌面图标 128px · 文字缩放 2.25× |
+| `trust_desktop_launcher.sh` | GNOME `metadata::trusted`（否则双击开编辑器） |
+
+**注意：** R1 官方镜像 `firefox` 为 snap 占位包；GUI 必须用 `/usr/bin/chromium`。

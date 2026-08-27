@@ -4,8 +4,8 @@
 export DISPLAY=:0
 export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 
-TEXT_SCALE="${1:-2.0}"
-UI_SCALE="${2:-2.0}"
+TEXT_SCALE="${1:-2.25}"
+UI_SCALE="${2:-2.25}"
 MONITORS="${HOME}/.config/monitors.xml"
 CURSOR=$(( ${TEXT_SCALE%.*} * 24 ))
 [ "$CURSOR" -lt 32 ] && CURSOR=32

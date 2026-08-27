@@ -26,7 +26,7 @@ import {
 } from "cursor/canvas";
 
 const CANVAS_PATH =
-  "C:\\Users\\wwff\\.cursor\\projects\\empty-window\\canvases\\r1-vlm-agent-roadmap.canvas.tsx";
+  "C:\\Users\\wwff\\Documents\\youyeetoo3588s\\canvases\\r1-vlm-agent-roadmap.canvas.tsx";
 
 const PHASES = [
   {
@@ -164,17 +164,17 @@ const TODOS: Record<
     { id: "p4-6", content: "vlm_see + p4_tts：看图描述 J368 喇叭播报（P4_TTS=1）", status: "completed" },
   ],
   p5: [
-    { id: "p5-a1", content: "llm_daemon：InternVL3.5-4B LLM-only 四件套 ~236MB 1828 常驻", status: "in_progress" },
-    { id: "p5-a2", content: "orchestrator：asyncio · VAD 始终监听 · sherpa online ASR", status: "pending" },
-    { id: "p5-a3", content: "分句 TTS 队列 + play_wav route guard · E2E 首响 <4s", status: "pending" },
-    { id: "p5-a4", content: "agent.yaml 提示词 · agent_api WS 占位（HDMI 触屏后排）", status: "pending" },
+    { id: "p5-a1", content: "llm_daemon：InternVL3.5-4B LLM-only 四件套 ~236MB 1828 常驻", status: "completed" },
+    { id: "p5-a2", content: "orchestrator：asyncio · VAD 始终监听 · streaming Paraformer ASR", status: "completed" },
+    { id: "p5-a3", content: "Matcha TTS 流水线播放 + barge-in · E2E 首响 <4s", status: "completed" },
+    { id: "p5-a4", content: "agent.yaml persona 兜底 · agent_api WS · HDMI GUI", status: "completed" },
     { id: "p5-s1", content: "并行 spike：VLM 六件套 text-only 可跳过 vision？", status: "pending" },
     { id: "p5-b1", content: "P5b see()：spike 过→统一 vlm_daemon；不过→按需 VLM", status: "pending" },
-    { id: "p5-c1", content: "P5c HDMI 触屏简易 UI（接 agent_api WebSocket）", status: "pending" },
+    { id: "p5-c1", content: "HDMI 全屏 GUI + 登录自启 + 壁纸 + 桌面图标", status: "completed" },
   ],
   p6: [
     { id: "p6-1", content: "rknn3.service ExecStartPre=sleep 5（proxy 时序）", status: "pending" },
-    { id: "p6-2", content: "voice_chat systemd 自启 · mic_setup 持久化", status: "pending" },
+    { id: "p6-2", content: "r1-llm-daemon + r1-orchestrator systemd · GUI 登录自启", status: "completed" },
   ],
 };
 
@@ -249,7 +249,11 @@ const PROGRESS_LOG = [
   { date: "2026-08-26 12:22", item: "Canvas ⑳", detail: "J368 喇叭 PulseAudio/ES8388 路由冲突 · 根因与验收" },
   { date: "2026-08-26 13:35", item: "P5 TECH v1", detail: "TECH_PLAN v1.0 锁定 · InternVL3.5-4B LLM-only llm_daemon · spike→P5b" },
   { date: "2026-08-26 13:35", item: "Canvas ㉑", detail: "P5 常驻模型规格 · 阶段 A–E · VLM spike · agent/ 代码库" },
-  { date: "2026-08-21 23:16", item: "里程碑", detail: "P0–P4 原型全通 · 下一步 P5 按需调度+Agent" },
+  { date: "2026-08-26 18:00", item: "P5 Agent", detail: "llm_daemon · orchestrator Phase E · Matcha TTS · Paraformer ASR" },
+  { date: "2026-08-26 20:00", item: "P5 修复", detail: "persona 兜底 · pipelined TTS · LLM socket 权限 · barge-in" },
+  { date: "2026-08-27 11:30", item: "HDMI GUI", detail: "Chromium 全屏 · WS 控制面板 · 桌面图标 · 退出按钮" },
+  { date: "2026-08-27 11:45", item: "桌面产品化", detail: "科技风 wallpaper.svg · systemd 自启 · 登录自动开 GUI · 2.25× 缩放" },
+  { date: "2026-08-21 23:16", item: "里程碑", detail: "P0–P4 原型全通 · P5 流式语音+GUI 进行中" },
 ] as const;
 
 const STATUS_LAYERS = [
@@ -270,6 +274,10 @@ const STATUS_LAYERS = [
   ["P4 RTSP 短描述", "✅", "InternVL · Vision 190ms · p4_test"],
   ["P4 TTS 播报", "✅", "p4_tts · voice_hw v2 · 描述朗读"],
   ["1828 预检", "✅", "p4_check_1828 · >80MB 拒绝 VLM"],
+  ["P5 llm_daemon 常驻", "✅", "systemd · /tmp/r1-llm.sock · ~236MB"],
+  ["P5 orchestrator 流式", "✅", "VAD · Paraformer · Matcha TTS · barge-in"],
+  ["P5 HDMI GUI", "✅", "Chromium 全屏 :8766 · WS :8765 · 登录自启"],
+  ["桌面壁纸/图标", "✅", "wallpaper.svg · ding 128px · trusted launcher"],
 ] as const;
 
 const P4_E2E_RESULTS = [
@@ -297,7 +305,7 @@ const P5_1828_SCHEDULER = [
   ["v1 不做", "see() / 统一 VLM", "P5b · 并行 spike 后定案"],
   ["3588 语音", "VAD + sherpa ASR/TTS", "CPU · 不用 3588 NPU"],
   ["编排", "Python asyncio + socket", "agent/orchestrator/"],
-  ["触屏", "agent_api WS :8765", "HDMI UI 预留 · P5c"],
+  ["触屏", "HDMI GUI · WS :8765", "Chromium 全屏 :8766 · 登录自启 ✅"],
   ["spike S1", "text-only 跳过 vision?", "Prefill 与 LLM-only 差 <200ms"],
   ["spike S2", "同 Session 图文交替", "无 Aborted · 上下文连贯"],
   ["P5b 候选", "统一 vlm_daemon ~3GB", "spike 全过则替换 llm_daemon"],
@@ -321,13 +329,25 @@ const P5_LLM_DAEMON_MODEL = [
 ] as const;
 
 const P5_IMPL_PHASES = [
-  ["A", "llm_daemon + llm_client", "10 轮 · TTFT <500ms", "in_progress"],
-  ["B", "VAD 始终监听 + orchestrator", "2s 说话 → ASR", "pending"],
-  ["C", "sherpa online ASR", "partial/final", "pending"],
-  ["D", "分句 TTS 队列", "E2E 首响 <4s", "pending"],
-  ["E", "agent.yaml + agent_api WS", "触屏预留", "pending"],
+  ["A", "llm_daemon + llm_client", "10 轮 · TTFT <500ms", "✅"],
+  ["B", "VAD 始终监听 + orchestrator", "Silero VAD · 端点检测", "✅"],
+  ["C", "streaming Paraformer ASR", "partial/final · bilingual", "✅"],
+  ["D", "Matcha TTS 流水线", "E2E 首响 <4s · barge-in", "✅"],
+  ["E", "agent.yaml + agent_api WS + HDMI GUI", "全屏 Chromium · 自启", "✅"],
   ["S", "VLM spike S1–S3", "与 A 并行", "pending"],
   ["P5b", "see() 或 vlm_daemon", "spike 定案", "deferred"],
+] as const;
+
+const P5_DESKTOP_GUI = [
+  ["控制面板", "agent/ui/index.html", "标题「语音助手」· 三对话框 · 退出"],
+  ["HTTP", "127.0.0.1:8766", "python3 http.server · open_agent_gui.sh"],
+  ["WebSocket", "127.0.0.1:8765/ws", "state · asr · llm_token · tts_sentence"],
+  ["浏览器", "/usr/bin/chromium", "--start-fullscreen · 勿用 firefox snap"],
+  ["登录自启", "xiaolan-gui-autostart.desktop", "autostart_agent_gui.sh"],
+  ["桌面图标", "小揽语音助手.desktop", "trust_desktop_launcher.sh"],
+  ["壁纸", "ui/wallpaper.svg", "set_tech_wallpaper.sh · 科技风"],
+  ["缩放", "scale_desktop_icons.sh", "icon 128px · text 2.25×"],
+  ["安装", "install_autostart.sh", "systemd + GUI + 壁纸一键"],
 ] as const;
 
 const P5_DECISIONS_LOCKED = [
@@ -337,16 +357,14 @@ const P5_DECISIONS_LOCKED = [
   ["D4", "Python asyncio + C++ daemon", "✅"],
   ["D5", "InternVL3.5-4B LLM-only 四件套", "✅"],
   ["D6", "v1 LLM → spike → 统一 vlm", "✅"],
-  ["D7", "HDMI 触屏 WS 预留 P5c", "✅"],
+  ["D7", "HDMI GUI + 登录自启 + 壁纸", "✅ 2026-08-27"],
 ] as const;
 
 const NEXT_MILESTONES = [
-  ["Phase A", "llm_daemon 1828 常驻", "InternVL3.5-4B LLM-only 四件套"],
-  ["Phase B–D", "VAD · online ASR · 分句 TTS", "流式 chat E2E <4s 首响"],
   ["Spike S", "VLM 统一常驻可行性", "并行 · 不过则 P5b 按需 VLM"],
   ["P5b", "see() 或 vlm_daemon", "spike 全过则替换 llm_daemon"],
-  ["P5c", "HDMI 触屏 UI", "agent_api WebSocket"],
-  ["P6", "systemd · 看门狗", "voice + agent 自启"],
+  ["P5 G-b", "InternVL chat template", "llm_daemon 重编 · 提示词服从"],
+  ["P6", "看门狗 · OTA · 指标", "rknn3 时序 · 日志"],
 ] as const;
 
 const VOICE_HW_FROZEN = [
@@ -629,6 +647,17 @@ const TEST_COMMANDS = {
     { label: "Wiki 参考", cmd: "https://wiki.youyeetoo.com/en/r1/OUMISC#fan" },
     { label: "SDK 板级", cmd: "BoardConfig-R1-Ubuntu.mk · Docker docker-start.sh" },
     { label: "烧录", cmd: "RKDevTool 只勾 boot → zboot.img（~15MB）" },
+  ],
+  agent: [
+    { label: "⭐【PC】推送 agent", cmd: "powershell -File C:\\Users\\wwff\\Documents\\youyeetoo3588s\\agent\\scripts\\push_agent.ps1" },
+    { label: "⭐【安装】systemd + GUI + 壁纸", cmd: "adb shell sudo bash /userdata/agent/scripts/install_autostart.sh" },
+    { label: "打开全屏 GUI", cmd: "bash /userdata/agent/scripts/open_agent_gui.sh" },
+    { label: "信任桌面图标", cmd: "bash /userdata/agent/scripts/trust_desktop_launcher.sh youyeetoo" },
+    { label: "设置科技风壁纸", cmd: "bash /userdata/agent/scripts/set_tech_wallpaper.sh youyeetoo" },
+    { label: "放大桌面图标", cmd: "bash /userdata/agent/scripts/scale_desktop_icons.sh youyeetoo 128 2.25" },
+    { label: "语音服务状态", cmd: "systemctl status r1-llm-daemon r1-orchestrator" },
+    { label: "WS 探测", cmd: "python3 /userdata/agent/scripts/ws_probe.py" },
+    { label: "GUI 日志", cmd: "tail -20 /userdata/agent/logs/gui_http.log" },
   ],
 } as const;
 
@@ -1075,7 +1104,14 @@ bash /userdata/p4/scripts/p4_test.sh
       <Table
         headers={["阶段", "交付", "验收", "状态"]}
         rows={P5_IMPL_PHASES.map((r) => [...r])}
-        rowTone={["info", "neutral", "neutral", "neutral", "neutral", "warning", "neutral"]}
+        rowTone={["success", "success", "success", "success", "success", "warning", "neutral"]}
+        striped
+      />
+      <H3>HDMI 桌面 GUI（2026-08-27）</H3>
+      <Table
+        headers={["项", "路径 / 端口", "说明"]}
+        rows={P5_DESKTOP_GUI.map((r) => [...r])}
+        rowTone={["info", "neutral", "neutral", "warning", "success", "success", "success", "neutral", "success"]}
         striped
       />
       <Table
@@ -1244,6 +1280,10 @@ bash /userdata/p4/scripts/p4_test.sh
         <CommandBlock title="" items={TEST_COMMANDS.flash} />
       </CollapsibleSection>
 
+      <CollapsibleSection title="⑭b P5 Agent · HDMI GUI" trailing={<Text size="small">agent/</Text>}>
+        <CommandBlock title="" items={TEST_COMMANDS.agent} />
+      </CollapsibleSection>
+
       <CollapsibleSection title="⑮ 一键验收脚本（复制整段）" trailing={<Text size="small">adb shell</Text>}>
         <Code>{`# === P1 完整验收（冷启动后执行）===
 uname -r
@@ -1297,6 +1337,14 @@ bash /userdata/p4/scripts/p4_test.sh
 # 仅看图 / 仅播报：
 bash /userdata/p4/scripts/vlm_see.sh /tmp/rtsp_latest.jpg
 bash /userdata/p4/scripts/p4_tts.sh "测试播报"`}</Code>
+        <Divider />
+        <Code>{`# === P5 Agent + HDMI GUI（adb shell）===
+sudo bash /userdata/agent/scripts/install_autostart.sh
+systemctl status r1-llm-daemon r1-orchestrator
+bash /userdata/agent/scripts/open_agent_gui.sh
+# 预期：Chromium 全屏 http://127.0.0.1:8766/ · WS 已连接 · 对着麦说话有状态变化
+
+python3 /userdata/agent/scripts/ws_probe.py`}</Code>
       </CollapsibleSection>
 
       <H2>完整时间线（可折叠查阅）</H2>
@@ -1571,7 +1619,7 @@ bash /userdata/p4/scripts/p4_tts.sh "测试播报"`}</Code>
 
       <BarChart
         categories={["HugePage", "pcie-rkep", "EP ATU", "5120MB", "InternVL VLM", "InternVL LLM", "Voice I/O", "RTSP", "Agent"]}
-        series={[{ name: "完成度 %", data: [100, 100, 100, 100, 100, 100, 92, 90, 8], tone: "info" }]}
+        series={[{ name: "完成度 %", data: [100, 100, 100, 100, 100, 100, 92, 90, 58], tone: "info" }]}
         height={180}
         valueSuffix="%"
         yMax={100}

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a1018"/>
+      <stop offset="45%" stop-color="#0f1419"/>
+      <stop offset="100%" stop-color="#122033"/>
+    </linearGradient>
+    <radialGradient id="glow1" cx="22%" cy="18%" r="45%">
+      <stop offset="0%" stop-color="#3d8bfd" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#3d8bfd" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="82%" cy="78%" r="40%">
+      <stop offset="0%" stop-color="#3dd68c" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#3dd68c" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="80" height="80" patternUnits="userSpaceOnUse">
+      <path d="M 80 0 L 0 0 0 80" fill="none" stroke="#3d8bfd" stroke-opacity="0.08" stroke-width="1"/>
+    </pattern>
+    <pattern id="gridFine" width="20" height="20" patternUnits="userSpaceOnUse">
+      <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#3d8bfd" stroke-opacity="0.04" stroke-width="0.5"/>
+    </pattern>
+    <linearGradient id="lineGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#3d8bfd" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#3d8bfd" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#3d8bfd" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="blur" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+  </defs>
+
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <rect width="1920" height="1080" fill="url(#gridFine)"/>
+  <rect width="1920" height="1080" fill="url(#grid)"/>
+  <rect width="1920" height="1080" fill="url(#glow1)"/>
+  <rect width="1920" height="1080" fill="url(#glow2)"/>
+
+  <!-- circuit traces -->
+  <g stroke="#3d8bfd" stroke-opacity="0.25" fill="none" stroke-width="2">
+    <path d="M 120 820 H 520 V 680 H 920"/>
+    <path d="M 1600 260 H 1200 V 420 H 800"/>
+    <path d="M 300 200 H 700 V 360 H 1100 V 520"/>
+    <circle cx="520" cy="680" r="6" fill="#3d8bfd" fill-opacity="0.5" stroke="none"/>
+    <circle cx="920" cy="680" r="6" fill="#3dd68c" fill-opacity="0.45" stroke="none"/>
+    <circle cx="1200" cy="260" r="6" fill="#3d8bfd" fill-opacity="0.5" stroke="none"/>
+    <circle cx="1100" cy="520" r="6" fill="#3dd68c" fill-opacity="0.45" stroke="none"/>
+  </g>
+
+  <!-- horizon arc -->
+  <ellipse cx="960" cy="1180" rx="900" ry="320" fill="none" stroke="#3d8bfd" stroke-opacity="0.12" stroke-width="3"/>
+
+  <!-- scan lines -->
+  <g opacity="0.06">
+    <rect x="0" y="120" width="1920" height="2" fill="#3d8bfd"/>
+    <rect x="0" y="360" width="1920" height="1" fill="#3d8bfd"/>
+    <rect x="0" y="600" width="1920" height="1" fill="#3d8bfd"/>
+    <rect x="0" y="840" width="1920" height="2" fill="#3d8bfd"/>
+  </g>
+
+  <!-- center glow orb -->
+  <circle cx="960" cy="540" r="180" fill="#3d8bfd" opacity="0.06" filter="url(#blur)"/>
+  <circle cx="960" cy="540" r="90" fill="none" stroke="#3d8bfd" stroke-opacity="0.2" stroke-width="2"/>
+  <circle cx="960" cy="540" r="140" fill="none" stroke="#3d8bfd" stroke-opacity="0.1" stroke-width="1" stroke-dasharray="8 12"/>
+
+  <!-- accent bars -->
+  <rect x="0" y="0" width="1920" height="4" fill="url(#lineGrad)"/>
+  <rect x="0" y="1076" width="1920" height="4" fill="url(#lineGrad)"/>
+
+  <!-- subtle hex hint -->
+  <g transform="translate(1560 140)" stroke="#3d8bfd" stroke-opacity="0.15" fill="none" stroke-width="1.5">
+    <polygon points="0,-50 43.3,-25 43.3,25 0,50 -43.3,25 -43.3,-25"/>
+    <polygon points="0,-30 26,-15 26,15 0,30 -26,15 -26,-15"/>
+  </g>
+  <g transform="translate(280 900)" stroke="#3dd68c" stroke-opacity="0.12" fill="none" stroke-width="1.5">
+    <polygon points="0,-40 34.6,-20 34.6,20 0,40 -34.6,20 -34.6,-20"/>
+  </g>
+</svg>

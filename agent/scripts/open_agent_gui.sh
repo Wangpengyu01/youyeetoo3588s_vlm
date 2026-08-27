@@ -19,6 +19,11 @@ notify() {
 
 mkdir -p "${AGENT_ROOT}/run" "${AGENT_ROOT}/logs"
 
+if pgrep -u "${USER:-youyeetoo}" -f "chromium.*${PORT}" >/dev/null 2>&1; then
+  echo "[gui] already running"
+  exit 0
+fi
+
 if [[ ! -f "${UI_DIR}/index.html" ]]; then
   notify "缺少界面文件，请重新部署 agent"
   exit 1

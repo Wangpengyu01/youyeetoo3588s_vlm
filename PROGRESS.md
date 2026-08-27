@@ -1,6 +1,6 @@
 # youyeetoo R1 + RM1828 项目进展
 
-> 最后更新：2026-08-21 22:00 UTC+8  
+> 最后更新：2026-08-27  
 > 板端：R1 · Ubuntu 22.04 · kernel 5.10.110 **#12**  
 > 加速卡：RK1828 · FW/API **1.0.5b10**
 
@@ -15,8 +15,8 @@
 | P2 静态看图 | ✅ 完成 | InternVL3.5-4B 448² 端到端描述正确 |
 | P3 纯文本对话 | ✅ 完成 | LLM-only · 不加载 vision · ~80 tok/s |
 | P4 RTSP 1fps | ✅ 原型通过 | RTSP tcp 640×480 → 448² 短描述 |
-| P5 智能体 | 待开始 | 聊天 / see() 分模式 |
-| P6 产品化 | 待开始 | systemd · 看门狗 · 语音 |
+| P5 智能体 | 🔵 进行中 | llm_daemon + orchestrator · 流式语音 · HDMI GUI |
+| P6 产品化 | 🔵 部分 | systemd 自启 · 桌面 GUI · 壁纸 |
 
 **产品目标模型：** InternVL3.5-4B（448² · W4A16 · thinking 关）
 
@@ -135,8 +135,32 @@ bash /userdata/p4/scripts/p4_loop.sh 3
 
 ---
 
+## P5 智能体 + 桌面 GUI（2026-08-27 · 进行中）
+
+| 项 | 状态 |
+|----|------|
+| `llm_daemon` + `r1-orchestrator` systemd | ✅ enable |
+| 流式 VAD · Paraformer ASR · Matcha TTS | ✅ |
+| persona 兜底 · pipelined TTS · barge-in | ✅ |
+| HDMI 全屏 GUI（Chromium :8766 · WS :8765） | ✅ |
+| 登录自启 GUI + 桌面图标 + 科技风壁纸 | ✅ |
+| 大屏布局：标题「语音助手」· 紧凑状态栏 | ✅ |
+
+```bash
+# PC 推送 + 安装
+powershell -File agent/scripts/push_agent.ps1
+adb shell sudo bash /userdata/agent/scripts/install_autostart.sh
+
+# 手动打开 GUI
+bash /userdata/agent/scripts/open_agent_gui.sh
+```
+
+---
+
 ## 待办
 
 - [x] P4：GStreamer RTSP tcp · 640×480 · 448² 短描述
-- [ ] P5：Agent + VLM 常驻 · 真 1fps · 语音/视觉分模式
+- [x] P5 基础：llm_daemon · orchestrator · 流式语音 · HDMI GUI
+- [ ] P5b：VLM spike → 统一 vlm_daemon / see()
+- [ ] P5：InternVL chat template · llm_daemon 重编
 - [ ] DTS 持久化 `hugepages=160`

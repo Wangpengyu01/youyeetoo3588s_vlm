@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=小揽语音助手
+Name[zh_CN]=小揽语音助手
+Comment=开机自动打开小揽语音助手
+Comment[zh_CN]=开机自动打开小揽语音助手
+Exec=/bin/bash /userdata/agent/scripts/autostart_agent_gui.sh
+Path=/userdata/agent
+Icon=audio-input-microphone
+Terminal=false
+Categories=Utility;Audio;
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
