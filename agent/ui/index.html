@@ -139,12 +139,21 @@
       flex: 1 1 auto;
       margin: 0;
       line-height: 1.45;
-      font-size: 1.2rem;
+      font-size: 0.95rem;
       word-break: break-word;
       overflow: hidden;
       display: -webkit-box;
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 8;
+    }
+    .card p.hint {
+      font-size: 0.72rem;
+      color: var(--muted);
+      white-space: nowrap;
+      display: block;
+      -webkit-line-clamp: unset;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
   </style>
 </head>
@@ -166,11 +175,11 @@
     <div class="cards">
       <div class="card">
         <h2>你说</h2>
-        <p id="asr">（等待语音输入）</p>
+        <p id="asr" class="hint">等待语音输入</p>
       </div>
       <div class="card">
         <h2>小揽</h2>
-        <p id="reply">（等待回复）</p>
+        <p id="reply" class="hint">等待回复</p>
       </div>
       <div class="card">
         <h2>正在播放</h2>
@@ -198,6 +207,11 @@
     };
 
     let llmBuf = "";
+
+    function setContent(el, text, isHint) {
+      el.textContent = text;
+      el.classList.toggle("hint", !!isHint);
+    }
 
     function setWs(on, text) {
       wsDot.className = "dot" + (on ? " on" : "");
@@ -233,19 +247,25 @@
         if (msg.type === "state" && msg.value) {
           stateEl.textContent = STATE_ZH[msg.value] || msg.value;
           setSvc(msg.value !== "IDLE" ? "busy" : true, msg.value === "IDLE" ? "语音服务正常" : "对话进行中");
-          if (msg.value === "LISTEN" || msg.value === "ASR") llmBuf = "";
+          if (msg.value === "LISTEN" || msg.value === "ASR") {
+            llmBuf = "";
+            if (msg.value === "LISTEN") {
+              setContent(asrEl, "等待语音输入", true);
+              setContent(replyEl, "等待回复", true);
+            }
+          }
         }
         if (msg.type === "asr_final" && msg.text) {
-          asrEl.textContent = msg.text;
+          setContent(asrEl, msg.text, false);
           llmBuf = "";
-          replyEl.textContent = "…";
+          setContent(replyEl, "…", false);
         }
-        if (msg.type === "asr_partial" && msg.text) asrEl.textContent = msg.text + " …";
+        if (msg.type === "asr_partial" && msg.text) setContent(asrEl, msg.text + " …", false);
         if (msg.type === "llm_token" && msg.text) {
           llmBuf += msg.text;
-          replyEl.textContent = llmBuf;
+          setContent(replyEl, llmBuf, false);
         }
-        if (msg.type === "tts_sentence" && msg.text) ttsEl.textContent = msg.text;
+        if (msg.type === "tts_sentence" && msg.text) setContent(ttsEl, msg.text, false);
       };
     }
     connect();

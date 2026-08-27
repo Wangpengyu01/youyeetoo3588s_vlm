@@ -147,7 +147,11 @@ class Orchestrator:
 
         self.socket_path = cfg.get("socket_path", "/tmp/r1-llm.sock")
         self.max_new_tokens = int(cfg.get("max_new_tokens", 64))
+        self.history_max_turns = int(cfg.get("history_max_turns", 4))
+        self.history_idle_clear_sec = float(cfg.get("history_idle_clear_sec", 600))
         self.system_prompt = (cfg.get("system_prompt") or "").strip()
+        self._chat_turns: list[tuple[str, str]] = []
+        self._llm_last_turn_at = 0.0
         self.vad_stream = VadStream(self.vad_config, self.vad_queue)
         self.tts_queue = TtsQueue(
             TtsEngine(
@@ -338,6 +342,38 @@ class Orchestrator:
         if lat is not None:
             LOG.info("[tts] utterance first_play=%.2fs (target <4s)", lat)
 
+    async def _prepare_llm_call(self) -> None:
+        now = time.monotonic()
+        if self._chat_turns and self.history_idle_clear_sec > 0:
+            idle = now - self._llm_last_turn_at
+            if idle >= self.history_idle_clear_sec:
+                LOG.info(
+                    "[llm] idle %.0fs >= %.0fs, clearing transcript",
+                    idle,
+                    self.history_idle_clear_sec,
+                )
+                self._chat_turns.clear()
+        await asyncio.to_thread(llm_clear_history, self.socket_path)
+
+    def _build_llm_prompt(self, user_text: str) -> str:
+        parts: list[str] = []
+        if self.system_prompt:
+            parts.append(self.system_prompt)
+        for user, assistant in self._chat_turns[-self.history_max_turns :]:
+            parts.append(f"用户：{user}\n小揽：{assistant}")
+        parts.append(f"用户：{user_text}\n小揽：")
+        return "\n\n".join(parts)
+
+    def _record_chat_turn(self, user: str, assistant: str) -> None:
+        text = assistant.strip()
+        if not text:
+            return
+        self._chat_turns.append((user, text))
+        if len(self._chat_turns) > self.history_max_turns:
+            self._chat_turns = self._chat_turns[-self.history_max_turns :]
+        self._llm_last_turn_at = time.monotonic()
+        LOG.info("[llm] transcript stored (%d/%d turns)", len(self._chat_turns), self.history_max_turns)
+
     async def _speak_turn(self, text: str) -> None:
         await self._speak_extracted(text, canned=True)
 
@@ -351,13 +387,13 @@ class Orchestrator:
             await self._speak_turn(speak)
             return
 
-        await asyncio.to_thread(llm_clear_history, self.socket_path)
-        if self.system_prompt:
-            prompt = f"{self.system_prompt}\n\n用户：{prompt}\n小揽："
+        await self._prepare_llm_call()
+        prompt = self._build_llm_prompt(user_prompt)
         LOG.info(
-            "[llm] prompt %d chars (system=%d) · user=%s",
+            "[llm] hist=%d/%d prompt %d chars · user=%s",
+            len(self._chat_turns),
+            self.history_max_turns,
             len(prompt),
-            len(self.system_prompt),
             user_prompt[:48],
         )
         buffer = {"text": ""}
@@ -391,13 +427,18 @@ class Orchestrator:
                 or is_spurious_name_reply(user_prompt, full)
                 or is_off_topic_reply(user_prompt, full)
             )
+            spoken = ""
             if not self._tts_abort and need_fallback:
                 await self.tts_queue.discard_pending()
                 speak = persona_reply_for(user_prompt)
+                spoken = speak
                 LOG.info("[llm] persona fallback: %s", speak[:48])
                 await self._speak_extracted(speak, canned=True)
             elif not self._tts_abort:
+                spoken = full
                 await self._speak_extracted(full, canned=False)
+            if not self._tts_abort and spoken.strip():
+                self._record_chat_turn(user_prompt, spoken)
             LOG.info(
                 "[llm] reply (%d chars, ttft=%.3fs): %s",
                 len(full),

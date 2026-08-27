@@ -13,6 +13,10 @@ system_prompt: |
   - 每句必须完整，以句号结尾，不要写到一半截断
   - 全文不超过两百个汉字，说完即止，不要铺垫、不要列举
 max_new_tokens: 144
+# Multi-turn: replay last N (user, assistant) pairs in each prompt (OpenAI-style sliding window)
+history_max_turns: 4
+# Drop transcript after this many seconds without an LLM turn (0 = keep until reboot)
+history_idle_clear_sec: 600
 socket_path: /tmp/r1-llm.sock
 
 vad:
