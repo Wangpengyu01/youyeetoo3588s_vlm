@@ -37,6 +37,7 @@ from tts.sentence_split import (
     persona_reply_for,
     sanitize_tts_text,
     should_skip_llm,
+    STOP_PATTERN,
 )
 from tts.tts_engine import TtsConfig, TtsEngine
 from tts.tts_queue import TtsQueue
@@ -67,6 +68,7 @@ class Orchestrator:
         self._active_tts_text = ""
         self._last_spoken_turn = ""
         self._last_tts_end_at = 0.0
+        self._last_barge_partial = ""
         self._paused_relay_text: str | None = None
         self._current_splitter: Any = None
 
@@ -216,6 +218,8 @@ class Orchestrator:
             return False
 
     def _new_asr_session(self):
+        self._last_barge_partial = ""
+
         async def on_partial(text: str) -> None:
             LOG.info("[event] asr_partial: %s", text)
             await self.emit({"type": "asr_partial", "text": text})
@@ -229,10 +233,33 @@ class Orchestrator:
                         + " "
                         + (getattr(self, "_last_spoken_turn", "") or "")
                     ).strip()
-                    if cur_speak and is_self_echo(cur_speak, clean_p):
-                        LOG.info("[barge-in] self-acoustic feedback detected ('%s' in '%s'), ignoring", clean_p, cur_speak[:30])
+
+                    # 1. 优先检查末尾是否含有打断停词 (停/闭嘴/别说了/等等/不要讲...)
+                    tail_check = clean_p[-6:]
+                    if STOP_PATTERN.search(tail_check) and (not cur_speak or tail_check not in cur_speak):
+                        LOG.info("[barge-in] stop keyword matched in tail ('%s'), interrupting TTS immediately", tail_check)
+                        await self._interrupt_tts()
                         return
-                    LOG.info("[barge-in] user spoke (%s), interrupting TTS immediately", text)
+
+                    # 2. 检查自上一帧 partial 以来新增的尾部字符增量 delta
+                    last_p = getattr(self, "_last_barge_partial", "")
+                    self._last_barge_partial = clean_p
+                    if clean_p.startswith(last_p) and len(clean_p) > len(last_p):
+                        delta = clean_p[len(last_p):]
+                    else:
+                        delta = clean_p[-4:]
+
+                    # 3. 如果新增增量在机器人播报文本中，则是机器人自己的回声
+                    if delta and cur_speak and is_self_echo(cur_speak, delta):
+                        LOG.info("[barge-in] self-acoustic feedback detected ('%s' in '%s'), ignoring", delta, cur_speak[:30])
+                        return
+
+                    # 4. 如果整句都在播报文本中，也是回声
+                    if cur_speak and is_self_echo(cur_speak, clean_p):
+                        LOG.info("[barge-in] self-acoustic feedback detected ('%s' in '%s'), ignoring", clean_p[:15], cur_speak[:30])
+                        return
+
+                    LOG.info("[barge-in] user spoke (delta='%s', text='%s'), interrupting TTS immediately", delta, text)
                     await self._interrupt_tts()
 
         async def on_final(text: str, meta: dict) -> None:
