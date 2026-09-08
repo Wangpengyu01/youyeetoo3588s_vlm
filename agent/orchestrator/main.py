@@ -24,6 +24,7 @@ from llm.client import llm_chat_stream, llm_clear_history, llm_ping
 from orchestrator.config_loader import load_yaml
 from orchestrator.events import AgentState
 from tts.sentence_split import (
+    StreamingSentenceSplitter,
     canned_reply_for,
     clean_llm_reply,
     extract_speak_sentences,
@@ -204,6 +205,11 @@ class Orchestrator:
         async def on_partial(text: str) -> None:
             LOG.info("[event] asr_partial: %s", text)
             await self.emit({"type": "asr_partial", "text": text})
+            if self.barge_in_enabled and self._speaking and text.strip():
+                clean_p = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", text)
+                if re.search(r"(停|别|闭嘴|算了|打住|不要|等一下|小揽|重置)", clean_p) or len(clean_p) >= 2:
+                    LOG.info("[barge-in] fast trigger on user speech: %s", text)
+                    await self._interrupt_tts()
 
         async def on_final(text: str, meta: dict) -> None:
             LOG.info("[event] asr_final: %s", text or meta.get("status"))
@@ -215,7 +221,7 @@ class Orchestrator:
     async def _interrupt_tts(self) -> None:
         if not self._speaking:
             return
-        LOG.info("[barge-in] interrupt TTS playback")
+        LOG.info("[barge-in] interrupt TTS playback immediately")
         self._tts_abort = True
         self._listen_cooldown_until = 0.0
         await self.tts_queue.interrupt()
@@ -251,8 +257,6 @@ class Orchestrator:
                 continue
             if etype == "speech_start":
                 LOG.info("[event] speech_start")
-                if self.barge_in_enabled and self._speaking:
-                    await self._interrupt_tts()
                 self._new_asr_session()
                 await self._asr_session.start()
                 continue
@@ -386,11 +390,17 @@ class Orchestrator:
         user_prompt = prompt
         self.set_state(AgentState.LLM)
 
-        if re.search(r"^(重置|重新开始|清空历史|刷新|重新聊|别说了|闭嘴|算了|打住)[了]?$", user_prompt.strip()):
+        u_clean = user_prompt.strip()
+        if re.search(r"^(重置|重新开始|清空历史|刷新|重新聊|别说了|闭嘴|算了|打住|停|停止|停下)[了]?$", u_clean):
             self._chat_turns.clear()
             await asyncio.to_thread(llm_clear_history, self.socket_path)
-            LOG.info("[llm] user requested session reset")
-            await self._speak_turn("好的，已为您重置对话，我们重新开始吧！")
+            LOG.info("[llm] user requested session reset / stop")
+            await self._speak_turn("好的。")
+            return
+
+        if len(u_clean) <= 1 or re.search(r"^[啊嗯呃哦用呀吧呵哈嘿]+$", u_clean):
+            LOG.info("[llm] ignored single char or filler noise: %s", u_clean)
+            self.set_state(AgentState.LISTEN)
             return
 
         if should_skip_llm(user_prompt):
@@ -410,6 +420,8 @@ class Orchestrator:
         )
         buffer = {"text": ""}
         loop = asyncio.get_running_loop()
+        splitter = StreamingSentenceSplitter(min_clause_chars=8, max_clause_chars=22)
+        tts_state: dict[str, int | bool] = {"n": 0, "canned": False}
 
         def on_token(piece: str) -> None:
             if self._tts_abort:
@@ -419,6 +431,17 @@ class Orchestrator:
                 self.emit({"type": "llm_token", "text": piece}),
                 loop,
             )
+            chunks = splitter.feed(piece)
+            for ch in chunks:
+                if self._tts_abort:
+                    break
+                if int(tts_state["n"]) == 0:
+                    self.set_state(AgentState.TTS)
+                    self._speaking = True
+                asyncio.run_coroutine_threadsafe(
+                    self._enqueue_speak(ch, tts_state),
+                    loop,
+                )
 
         try:
             reply = await asyncio.to_thread(
@@ -428,27 +451,42 @@ class Orchestrator:
                 sock_path=self.socket_path,
                 max_new_tokens=self.max_new_tokens,
             )
+            rem = splitter.finish()
+            for ch in rem:
+                if self._tts_abort:
+                    break
+                if int(tts_state["n"]) == 0:
+                    self.set_state(AgentState.TTS)
+                    self._speaking = True
+                await self._enqueue_speak(ch, tts_state)
+
             full = clean_llm_reply(user_prompt, reply["text"])
 
             # 循环重复死锁破除：如果回答与上一轮一模一样，或者重复上一句
             if self._chat_turns and full.strip() and full.strip() == self._chat_turns[-1][1].strip():
                 LOG.warning("[llm] detected repetition loop with previous turn: %s, breaking out", full[:40])
                 self._chat_turns.clear()
-                full = "在呢，请问有什么我可以帮您的吗？"
+                if not self._tts_abort:
+                    await self.tts_queue.interrupt()
+                    await self._speak_turn("在呢，请问有什么我可以帮您的吗？")
+                return
 
-            need_fallback = not full.strip()
-            spoken = ""
-            if not self._tts_abort and need_fallback:
-                await self.tts_queue.discard_pending()
+            if int(tts_state["n"]) == 0 and not self._tts_abort:
                 speak = persona_reply_for(user_prompt)
-                spoken = speak
                 LOG.info("[llm] persona fallback: %s", speak[:48])
                 await self._speak_extracted(speak, canned=True)
+                full = speak
             elif not self._tts_abort:
-                spoken = full
-                await self._speak_extracted(full, canned=False)
-            if not self._tts_abort and spoken.strip():
-                self._record_chat_turn(user_prompt, spoken)
+                try:
+                    await self.tts_queue.wait_done()
+                finally:
+                    self._speaking = False
+
+            if not self._tts_abort:
+                self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
+                if full.strip():
+                    self._record_chat_turn(user_prompt, full)
+
             LOG.info(
                 "[llm] reply (%d chars, ttft=%.3fs): %s",
                 len(full),

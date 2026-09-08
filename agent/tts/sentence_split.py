@@ -290,3 +290,84 @@ def extract_speak_sentences(text: str, max_cjk: int = 99999, *, max_chunk_len: i
 def flush_remainder(buffer: str) -> list[str]:
     text = sanitize_tts_text(buffer)
     return [text] if is_speakable(text) else []
+
+
+class StreamingSentenceSplitter:
+    """Consumes LLM tokens in real-time, emitting speakable clauses/sentences as early as possible."""
+
+    def __init__(self, min_clause_chars: int = 8, max_clause_chars: int = 24):
+        self.min_clause_chars = min_clause_chars
+        self.max_clause_chars = max_clause_chars
+        self._buf = ""
+        self._think_active = False
+
+    def feed(self, piece: str) -> list[str]:
+        self._buf += piece
+        if "<think>" in self._buf:
+            self._think_active = True
+        if self._think_active:
+            if "</think>" in self._buf:
+                self._buf = self._buf.split("</think>", 1)[1]
+                self._think_active = False
+            else:
+                return []
+
+        # Strip prefixes and special tokens
+        self._buf = re.sub(r"^小揽[：:]\s*", "", self._buf)
+        self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
+
+        chunks: list[str] = []
+        while True:
+            # 1. Check for sentence-ending punctuation (。！？!?\n)
+            m = re.search(r"[。！？!?\n]+", self._buf)
+            if m:
+                end_pos = m.end()
+                raw_chunk = self._buf[:end_pos].strip()
+                self._buf = self._buf[end_pos:]
+                clean = sanitize_tts_text(raw_chunk)
+                if is_speakable(clean):
+                    if not clean.endswith(("。", "！", "？")):
+                        clean += "。"
+                    chunks.append(clean)
+                continue
+
+            # 2. Check for clause boundaries (，,；;) when buffer has enough characters
+            m_comma = re.search(r"[，,；;]+", self._buf)
+            if m_comma and m_comma.start() >= self.min_clause_chars:
+                end_pos = m_comma.end()
+                raw_chunk = self._buf[:end_pos].strip()
+                self._buf = self._buf[end_pos:]
+                clean = sanitize_tts_text(raw_chunk)
+                if is_speakable(clean):
+                    if not clean.endswith(("。", "！", "？", "，")):
+                        clean += "。"
+                    chunks.append(clean)
+                continue
+
+            # 3. Buffer length safety cap
+            if len(self._buf) >= self.max_clause_chars:
+                raw_chunk = self._buf[: self.max_clause_chars].strip()
+                self._buf = self._buf[self.max_clause_chars :]
+                clean = sanitize_tts_text(raw_chunk)
+                if is_speakable(clean):
+                    if not clean.endswith(("。", "！", "？")):
+                        clean += "。"
+                    chunks.append(clean)
+                continue
+
+            break
+
+        return chunks
+
+    def finish(self) -> list[str]:
+        if not self._buf.strip():
+            return []
+        raw = self._buf.strip()
+        self._buf = ""
+        clean = sanitize_tts_text(raw)
+        if is_speakable(clean):
+            if not clean.endswith(("。", "！", "？")):
+                clean += "。"
+            return [clean]
+        return []
+

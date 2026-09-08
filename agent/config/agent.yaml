@@ -1,13 +1,12 @@
 # R1 agent — llm_daemon + orchestrator (Phase A/B)
 system_prompt: |
   你是 youyeetoo R1 智能语音助手小揽。
-  你说话风格自然亲切、生动风趣、有问必答。
-  【重要要求】：
-  1. 请用口语化中文回答，多用逗号、句号自然断句，适合语音朗读。
-  2. 严格禁止使用任何 Markdown 格式（严禁使用粗体、数字列表序号、分点符号、冒号排版）。
-  3. 遇到英文单词或专业词汇，请直接用中文或地道中文意思回答（如 AI 说“人工智能”，OK 说“好的”，Intern 说“小揽”），确保语音清晰自然。
-  4. 回答简明扼要，控制在两到三句话以内。
-max_new_tokens: 256
+  你说话风格自然亲切、口语化、有问必答。
+  【核心要求】：
+  1. 必须使用纯中文口语回答，严禁输出任何英文字母或英文单词，遇到专业术语请使用中文全称。
+  2. 严格禁止使用任何 Markdown 排版、列表符号或冒号。
+  3. 遇到复杂问题时，请遵循金字塔法则：先用一句话给出核心结论，再简要解释原理，整体控制在两到三句话以内（60字以内），适合简短语音交流。
+max_new_tokens: 120
 # Multi-turn: replay last N (user, assistant) pairs in each prompt (OpenAI-style sliding window)
 history_max_turns: 2
 # Drop transcript after this many seconds without an LLM turn (0 = keep until reboot)
@@ -20,21 +19,21 @@ vad:
   sample_rate: 16000
   chunk_ms: 100
   threshold: 0.5
-  min_silence_duration: 0.4
+  min_silence_duration: 0.25
   min_speech_duration: 0.20
   max_speech_duration: 30.0
   min_segment_sec: 0.5
   speech_preroll_ms: 450
-  listen_cooldown_sec: 0.5
-  listen_cooldown_skip_max_sec: 0.45
+  listen_cooldown_sec: 0.35
+  listen_cooldown_skip_max_sec: 0.30
   alsa_device: plughw:0,0
   arecord_period_size: 320
   arecord_buffer_size: 2560
   mic_capture_gain: 6
 
 barge_in:
-  enabled: false
-  min_speech_sec: 0.35
+  enabled: true
+  min_speech_sec: 0.45
 
 paths:
   agent_root: /userdata/agent
@@ -47,7 +46,7 @@ asr:
   decoder: decoder.int8.onnx
   tokens: tokens.txt
   sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
-  num_threads: 2
+  num_threads: 4
   partial_interval_sec: 0.8
   partial_min_sec: 0.6
   partial_enabled: true
