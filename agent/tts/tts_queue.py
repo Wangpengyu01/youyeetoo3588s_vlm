@@ -32,41 +32,48 @@ class TtsQueue:
         self._utterance_chunks = 0
         self._played_chunks = 0
         self._utterance_gain: float | None = None
+        self._current_speaking_chunk: str | None = None
 
     @property
     def is_playing(self) -> bool:
         return self._play_task is not None and not self._interrupted.is_set() and (
-            self._wav_q.qsize() > 0 or self._text_q.qsize() > 0
+            self._wav_q.qsize() > 0 or self._text_q.qsize() > 0 or self._current_speaking_chunk is not None
         )
 
     def set_max_sentences(self, n: int) -> None:
         _ = n
 
-    async def discard_pending(self) -> None:
+    async def discard_pending(self) -> list[str]:
+        texts: list[str] = []
+        if self._current_speaking_chunk:
+            texts.append(self._current_speaking_chunk)
+            self._current_speaking_chunk = None
         while True:
             try:
-                self._text_q.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            else:
-                self._text_q.task_done()
-        await self._drain_wav_queue()
-
-    async def _drain_wav_queue(self) -> None:
-        while True:
-            try:
-                self._wav_q.get_nowait()
+                item = self._wav_q.get_nowait()
+                if item and len(item) > 1 and item[1]:
+                    texts.append(item[1])
             except asyncio.QueueEmpty:
                 break
             else:
                 self._wav_q.task_done()
+        while True:
+            try:
+                t = self._text_q.get_nowait()
+                if t:
+                    texts.append(t)
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._text_q.task_done()
+        return texts
 
-    async def interrupt(self) -> None:
+    async def interrupt(self) -> list[str]:
         self._interrupted.set()
-        await self.discard_pending()
-        await self._drain_wav_queue()
+        pending = await self.discard_pending()
         await asyncio.to_thread(self.engine.stop_playback)
-        LOG.info("[tts] interrupted")
+        LOG.info("[tts] interrupted, saved %d clauses for relay", len(pending))
+        return pending
 
     async def start(self) -> None:
         if self._synth_task is None:
@@ -148,13 +155,17 @@ class TtsQueue:
                 last = self._played_chunks >= self._utterance_chunks
                 LOG.info("[tts] speak (%d/%d): %s", self._played_chunks, self._utterance_chunks, text[:80])
                 t0 = time.monotonic()
-                gain = await asyncio.to_thread(
-                    self.engine.play,
-                    wav,
-                    continuation=continuation,
-                    last_in_utterance=last,
-                    utterance_gain=self._utterance_gain,
-                )
+                self._current_speaking_chunk = text
+                try:
+                    gain = await asyncio.to_thread(
+                        self.engine.play,
+                        wav,
+                        continuation=continuation,
+                        last_in_utterance=last,
+                        utterance_gain=self._utterance_gain,
+                    )
+                finally:
+                    self._current_speaking_chunk = None
                 if self._utterance_gain is None and gain is not None:
                     self._utterance_gain = gain
                 if self._interrupted.is_set():

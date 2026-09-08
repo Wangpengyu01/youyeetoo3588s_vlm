@@ -316,8 +316,8 @@ class StreamingSentenceSplitter:
         self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
 
         chunks: list[str] = []
-        # Fast First Chunk: split at first natural punctuation (>=2 chars like "太阳系，")
-        curr_min = 2 if not self._first_chunk_emitted else self.min_clause_chars
+        # Natural Clause Split: require at least 8 characters before comma split to prevent isolated short subjects
+        curr_min = 8 if not self._first_chunk_emitted else self.min_clause_chars
         curr_max = 24 if not self._first_chunk_emitted else self.max_clause_chars
 
         while True:

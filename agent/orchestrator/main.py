@@ -231,7 +231,10 @@ class Orchestrator:
         LOG.info("[barge-in] interrupt TTS playback immediately")
         self._tts_abort = True
         self._listen_cooldown_until = 0.0
-        await self.tts_queue.interrupt()
+        pending = await self.tts_queue.interrupt()
+        if pending:
+            self._paused_relay_text = "".join(pending).strip()
+            LOG.info("[relay] saved %d pending clauses (%d chars) for resume: %s", len(pending), len(self._paused_relay_text), self._paused_relay_text[:40])
         await self.emit({"type": "barge_in", "phase": "tts"})
 
     async def run_vad_loop(self, inject_wav: str | None = None) -> None:
@@ -405,13 +408,25 @@ class Orchestrator:
         self.set_state(AgentState.LLM)
 
         u_clean = user_prompt.strip()
+
+        # 1. 检查是否为“继续 / 接着说 / 然后呢 / 往下说”等接力指令
+        RESUME_PAT = re.compile(r"^(继续|接着说|然后呢|往下说|接着讲|继续讲|继续说|还有呢|你接着说|你继续|接力)[吧呀啊呢了]?$")
+        if RESUME_PAT.search(u_clean) and getattr(self, "_paused_relay_text", None):
+            relay = self._paused_relay_text
+            self._paused_relay_text = None
+            LOG.info("[relay] resuming playback from paused sentences (%d chars): %s", len(relay), relay[:60])
+            await self._speak_turn(relay)
+            return
+
+        # 2. 检查是否为“停 / 暂停 / 别说了 / 闭嘴 / 打住”等停止指令
         STOP_PAT = re.compile(r"(停|暂停|别说了|闭嘴|算了|打住|停止|停下|别讲|不要说|闭上嘴|别出声|安静|停一下)")
         if STOP_PAT.search(u_clean):
-            self._chat_turns.clear()
-            await asyncio.to_thread(llm_clear_history, self.socket_path)
-            LOG.info("[llm] user requested session reset / stop: %s", u_clean)
+            LOG.info("[llm] user requested stop: %s (saved relay: %s)", u_clean, bool(getattr(self, "_paused_relay_text", None)))
             await self._speak_turn("好的。")
             return
+
+        # 3. 若为新提问，清空旧的接力缓存
+        self._paused_relay_text = None
 
         if len(u_clean) <= 1 or re.search(r"^[啊嗯呃哦用呀吧呵哈嘿]+$", u_clean):
             LOG.info("[llm] ignored single char or filler noise: %s", u_clean)
