@@ -591,7 +591,7 @@ class Orchestrator:
             while not llm_task.done() or not token_queue.empty():
                 try:
                     piece = await asyncio.wait_for(token_queue.get(), timeout=0.04)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     continue
                 if self._tts_abort or generation != self._active_turn_id:
                     continue

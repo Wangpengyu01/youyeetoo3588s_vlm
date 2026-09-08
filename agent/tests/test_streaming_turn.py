@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 import time
 import unittest
@@ -28,6 +29,10 @@ class FakeTtsQueue:
 
 
 class StreamingTurnTests(unittest.IsolatedAsyncioTestCase):
+    def test_stream_loop_handles_the_asyncio_timeout_class_used_by_python_310(self) -> None:
+        source = inspect.getsource(Orchestrator._run_llm)
+        self.assertIn("except asyncio.TimeoutError:", source)
+
     async def test_llm_failure_speaks_a_short_recovery_prompt(self) -> None:
         orch = object.__new__(Orchestrator)
         orch._chat_turns = []
