@@ -452,9 +452,13 @@ class Orchestrator:
 
         # 1. 检查是否为“继续 / 接着说 / 然后呢 / 往下说 / 你说 / 说”等接力指令
         RESUME_PAT = re.compile(
-            r"^(好[的了]|行[的了]|那|可以|请)?\s*(你)?\s*(继续|接着说|然后呢|往下说|接着讲|继续讲|继续说|还有呢|你接着说|你继续|接力|你说|你说吧|说吧|你讲|讲吧|说|讲|说下去|接下去说|接力说|继续接力|往下讲|接下来说)[吧呀啊呢了哦嘛]*$"
+            r"^(?:[请那你行好可以接着经已就再]+)?\s*(?:你)?\s*(?:继续|接着说|然后呢|往下说|接着讲|继续讲|继续说|还有呢|你接着说|你继续|接力|你说|你说吧|说吧|你讲|讲吧|说|讲|说下去|接下去说|接力说|继续接力|往下讲|接下来说)[吧呀啊呢了哦嘛]*$"
         )
-        if RESUME_PAT.search(u_clean):
+        is_resume = bool(RESUME_PAT.search(u_clean)) or (
+            len(u_clean) <= 6
+            and bool(re.search(r"(继续|接着说|然后呢|往下说|接着讲|继续讲|继续说|还有呢|接力|你说|说吧|你讲|讲吧|说下去)", u_clean))
+        )
+        if is_resume:
             if getattr(self, "_paused_relay_text", None):
                 relay = self._paused_relay_text
                 self._paused_relay_text = None
