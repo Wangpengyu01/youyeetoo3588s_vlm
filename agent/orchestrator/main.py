@@ -276,9 +276,9 @@ class Orchestrator:
             if etype == "audio_segment":
                 duration = float(event.get("duration_sec", 0.0))
                 if self._speaking:
-                    LOG.info("[barge-in] speech segment %.2fs detected during TTS, interrupting playback immediately", duration)
-                    await self._interrupt_tts()
-                    await self._turn_queue.put(event)
+                    if duration >= 0.8:
+                        LOG.info("[vad] speaking turn, queuing potential user speech (%.2fs)", duration)
+                        await self._turn_queue.put(event)
                     continue
                 if self._turn_busy and not self._speaking and not self._tts_abort:
                     if duration >= 0.8:

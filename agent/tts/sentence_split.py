@@ -316,9 +316,9 @@ class StreamingSentenceSplitter:
         self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
 
         chunks: list[str] = []
-        # Fast First Chunk: first sentence uses natural 6-10 char clause threshold to preserve 2-char words
-        curr_min = 6 if not self._first_chunk_emitted else self.min_clause_chars
-        curr_max = 10 if not self._first_chunk_emitted else self.max_clause_chars
+        # Fast First Chunk: split at first natural punctuation (>=2 chars like "太阳系，")
+        curr_min = 2 if not self._first_chunk_emitted else self.min_clause_chars
+        curr_max = 24 if not self._first_chunk_emitted else self.max_clause_chars
 
         while True:
             # 1. Check for sentence-ending punctuation (。！？!?\n)
@@ -337,8 +337,8 @@ class StreamingSentenceSplitter:
                     curr_max = self.max_clause_chars
                 continue
 
-            # 2. Check for clause boundaries (，,；;) when buffer has enough characters
-            m_comma = re.search(r"[，,；;]+", self._buf)
+            # 2. Check for clause boundaries (，,；;、) when buffer has enough characters
+            m_comma = re.search(r"[，,；;、]+", self._buf)
             if m_comma and m_comma.start() >= curr_min:
                 end_pos = m_comma.end()
                 raw_chunk = self._buf[:end_pos].strip()
