@@ -6,7 +6,7 @@ system_prompt: |
   1. 必须使用纯中文口语回答，严禁输出任何英文字母或英文单词，遇到专业术语请使用中文全称。
   2. 严格禁止使用任何 Markdown 排版、列表符号或冒号。
   3. 遇到复杂问题时，请遵循金字塔法则：先用一句话给出核心结论，再简要解释原理，整体控制在两到三句话以内（60字以内），适合简短语音交流。
-max_new_tokens: 120
+max_new_tokens: 72
 # Multi-turn: replay last N (user, assistant) pairs in each prompt (OpenAI-style sliding window)
 history_max_turns: 2
 # Drop transcript after this many seconds without an LLM turn (0 = keep until reboot)
@@ -19,7 +19,7 @@ vad:
   sample_rate: 16000
   chunk_ms: 100
   threshold: 0.5
-  min_silence_duration: 0.25
+  min_silence_duration: 0.45
   min_speech_duration: 0.20
   max_speech_duration: 30.0
   min_segment_sec: 0.5

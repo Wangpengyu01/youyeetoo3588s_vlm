@@ -214,8 +214,8 @@ class Orchestrator:
             await self.emit({"type": "asr_partial", "text": text})
             if self.barge_in_enabled and self._speaking and text.strip():
                 clean_p = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", text)
-                if re.search(r"(停|别|闭嘴|算了|打住|不要|等一下|小揽|重置|住口|安静)", clean_p):
-                    LOG.info("[barge-in] fast trigger on stop command: %s", text)
+                if len(clean_p) >= 1:
+                    LOG.info("[barge-in] user spoke (%s), interrupting TTS immediately", text)
                     await self._interrupt_tts()
 
         async def on_final(text: str, meta: dict) -> None:
@@ -275,11 +275,8 @@ class Orchestrator:
                 continue
             if etype == "audio_segment":
                 duration = float(event.get("duration_sec", 0.0))
-                if self._turn_busy and not self._speaking:
+                if self._turn_busy and not self._speaking and not self._tts_abort:
                     LOG.info("[vad] busy ASR/LLM, drop %.2fs segment", duration)
-                    continue
-                if self._speaking:
-                    LOG.info("[vad] segment %.2fs during TTS, ignoring speaker echo", duration)
                     continue
                 if (
                     not self._speaking
@@ -463,15 +460,6 @@ class Orchestrator:
                 await self._enqueue_speak(ch, tts_state)
 
             full = clean_llm_reply(user_prompt, reply["text"])
-
-            # 循环重复死锁破除：如果回答与上一轮一模一样，或者重复上一句
-            if self._chat_turns and full.strip() and full.strip() == self._chat_turns[-1][1].strip():
-                LOG.warning("[llm] detected repetition loop with previous turn: %s, breaking out", full[:40])
-                self._chat_turns.clear()
-                if not self._tts_abort:
-                    await self.tts_queue.interrupt()
-                    await self._speak_turn("在呢，请问有什么我可以帮您的吗？")
-                return
 
             if int(tts_state["n"]) == 0 and not self._tts_abort:
                 speak = persona_reply_for(user_prompt)
