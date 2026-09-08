@@ -9,7 +9,7 @@
 
 export MIC_ROUTE=main_board
 export MIC_SOURCE=main
-export PLAYBACK_ROUTE=headphone
+export PLAYBACK_ROUTE=both
 export PLAYBACK_MONO=stereo
 export PLAYBACK_CHANNELS=2
 
@@ -42,3 +42,16 @@ export VOICE_RESTORE_MIC=1
 
 echo "[HW] 冻结配置 v2 · 板载麦 + SH1.25 L/R 立体声"
 echo "  MIC: ${MIC_ROUTE} gain=${MIC_CAPTURE_GAIN} · PLAY: ${PLAYBACK_RATE}Hz normalize→${PLAYBACK_TARGET_PEAK} ch=${PLAYBACK_CHANNELS}"
+
+# Apply the external amplifier route before the voice service starts.
+SPEAKER_SETUP_SCRIPT="${SPEAKER_SETUP_SCRIPT:-/userdata/voice/scripts/speaker_setup.sh}"
+bash "${SPEAKER_SETUP_SCRIPT}" >/dev/null
+PULSE_SERVER="${PULSE_SERVER:-unix:/tmp/pulse-socket}"
+pactl -s "${PULSE_SERVER}" set-sink-port \
+  alsa_output.platform-es8388-sound.HiFi__hw_rockchipes8388__sink \
+  '[Out] Headphones' 2>/dev/null || true
+pactl -s "${PULSE_SERVER}" set-sink-volume \
+  alsa_output.platform-es8388-sound.HiFi__hw_rockchipes8388__sink 100% 2>/dev/null || true
+amixer -c 0 sset 'Headphone' on 100% 2>/dev/null || true
+amixer -c 0 sset 'Speaker' on 100% 2>/dev/null || true
+

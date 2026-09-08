@@ -3,42 +3,88 @@ from __future__ import annotations
 
 import re
 
-_PRIMARY = re.compile(r"([^。！？!?]+[。！？!?])")
+_PRIMARY = re.compile(r"([^。！？!?\n]+[。！？!?\n])")
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 
 _MD_BOLD = re.compile(r"\*\*([^*]+)\*\*")
-_MD_LIST = re.compile(r"^\s*\d+\.\s*", re.MULTILINE)
+_MD_LIST = re.compile(r"^\s*[-*•]\s*", re.MULTILINE)
+_MD_NUM_LIST = re.compile(r"^\s*\d+[\.、]\s*", re.MULTILINE)
 _MD_HEAD = re.compile(r"^#+\s*", re.MULTILINE)
-_ASCII = re.compile(r"[A-Za-z]+")
-_DIGITS = re.compile(r"\d+")
-# TTS 只保留汉字和句末标点；冒号/分号/括号等会被念出来且很难听
-_NON_SPOKEN = re.compile(r"[^\u4e00-\u9fff。！？，]")
-_WS = re.compile(r"\s+")
 
-_MIN_CJK_CHARS = 4
+LETTER_MAP = {
+    "A": "诶", "B": "必", "C": "西", "D": "弟", "E": "伊", "F": "艾弗",
+    "G": "吉", "H": "艾尺", "I": "爱", "J": "借", "K": "开", "L": "艾勒",
+    "M": "艾姆", "N": "恩", "O": "欧", "P": "批", "Q": "丘", "R": "阿尔",
+    "S": "艾斯", "T": "踢", "U": "优", "V": "微", "W": "达布溜", "X": "艾克斯",
+    "Y": "歪", "Z": "贼",
+}
+
+COMMON_EN = [
+    (r"\b(hello|hi)\b", "哈喽"),
+    (r"\bok(ay)?\b", "好的"),
+    (r"\b(bye|goodbye)\b", "再见"),
+    (r"\b(yes|yeah)\b", "是的"),
+    (r"\bno\b", "不"),
+    (r"\bgood\b", "好"),
+    (r"\bai\b", "人工智能"),
+    (r"\bapp\b", "应用"),
+    (r"\bapi\b", "接口"),
+    (r"\bintern-?s1\b", "小揽"),
+    (r"\bintern\b", "小揽"),
+    (r"\br1\b", "阿尔一"),
+    (r"\bcpu\b", "处理器"),
+    (r"\bgpu\b", "显卡"),
+    (r"\bnpu\b", "神经网络处理器"),
+    (r"\busb\b", "优盘"),
+    (r"\bwifi\b", "无线网"),
+]
+
+_DIGIT_MAP = str.maketrans("0123456789", "零一二三四五六七八九")
+_MIN_SPOKEN_CHARS = 2
+
+
+def transliterate_en(text: str) -> str:
+    """Map common English words and letters to Chinese phonetics for pure-Chinese TTS."""
+    for pattern, rep in COMMON_EN:
+        text = re.sub(pattern, rep, text, flags=re.IGNORECASE)
+
+    def repl_letter(m: re.Match[str]) -> str:
+        ch = m.group(0).upper()
+        return LETTER_MAP.get(ch, ch)
+
+    return re.sub(r"[A-Za-z]", repl_letter, text)
 
 
 def sanitize_tts_text(text: str) -> str:
     text = _MD_BOLD.sub(r"\1", text)
-    text = _MD_LIST.sub("", text)
+    text = _MD_LIST.sub("，", text)
+    text = _MD_NUM_LIST.sub("，", text)
     text = _MD_HEAD.sub("", text)
     text = text.replace("*", "").replace("`", "").replace("#", "")
-    # LLM 常复读 prompt 里的「小揽：」前缀
+    # LLM 常复读 prompt 里的「小揽：」前缀或标记
     text = re.sub(r"^小揽[：:]\s*", "", text)
+    text = re.sub(r"<\|im_end\|>.*", "", text)
+    text = re.sub(r"<\|.*?\|>", "", text)
     text = re.sub(r"三[Dd]?打印", "三维打印", text, flags=re.IGNORECASE)
-    text = _ASCII.sub("", text)
-    text = _DIGITS.sub("", text)
-    text = re.sub(r"[：:；;、·\-—–\.．\(\)（）【】\[\]「」\"\"'\"]+", "", text)
-    text = _NON_SPOKEN.sub("", text)
-    text = _WS.sub("", text)
+    # 冒号、分号转逗号停顿，换行转句号
+    text = re.sub(r"[：:；;]+", "，", text)
+    text = re.sub(r"[\r\n]+", "。", text)
+    # 数字转汉字
+    text = text.translate(_DIGIT_MAP)
+    # 英文音译转汉字发音
+    text = transliterate_en(text)
+    # 过滤无法发音的符号
+    text = re.sub(r"[-—–\.．\(\)（）【】\[\]「」\"\"\'\'·=]+", "", text)
+    text = re.sub(r"[^\u4e00-\u9fff。！？，]", "", text)
     text = re.sub(r"[，]{2,}", "，", text)
+    text = re.sub(r"[，。！？]+([。！？])", r"\1", text)
     text = re.sub(r"^[，。！？]+", "", text)
-    text = re.sub(r"[，]+$", "", text)
+    text = re.sub(r"[，]+$", "。", text)
     return text.strip()
 
 
 def is_speakable(text: str) -> bool:
-    return len(_CJK.findall(text)) >= _MIN_CJK_CHARS
+    return len(re.findall(r"[\u4e00-\u9fff0-9]", text)) >= _MIN_SPOKEN_CHARS
 
 
 def count_cjk(text: str) -> int:
@@ -121,8 +167,11 @@ def user_asked_name(user_text: str) -> bool:
 
 
 def clean_llm_reply(user_text: str, reply: str) -> str:
-    """Strip spurious self-intro when user did not ask for name."""
+    """Strip spurious self-intro and thinking tags."""
     text = (reply or "").strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"</?think>", "", text)
+    text = re.sub(r"<\|.*?\|>", "", text)
     text = re.sub(r"^小揽[：:]\s*", "", text)
     if not user_asked_name(user_text):
         text = _INTRO_PREFIX.sub("", text).strip()
@@ -141,53 +190,36 @@ def is_spurious_name_reply(user_text: str, reply: str) -> bool:
 
 
 def is_robotic_reply(text: str) -> bool:
-    return bool(_BAD_REPLY.search(text))
+    return False
 
 
 def is_off_topic_reply(user_text: str, reply: str) -> bool:
-    """User asked persona/capability/story but LLM lectured or deflected."""
-    if is_spurious_name_reply(user_text, reply):
-        return True
-    if _STORY.search(user_text) and _BAD_REPLY.search(reply):
-        return True
-    if _RECITE.search(user_text) and _NAME_ONLY.match(sanitize_tts_text(clean_llm_reply(user_text, reply))):
-        return True
-    if not (_CAPABILITY.search(user_text) or _NAME.search(user_text) or _GREET.search(user_text.strip())):
-        return False
-    return bool(_SCIENCE_LECTURE.search(reply) or is_robotic_reply(reply))
+    return False
+
+
+_PRESENCE = re.compile(r"^(你?在[吗嘛]|人呢|你在[哪哪儿]|在不在|小揽)[呀啊吧]?$")
 
 
 def persona_reply_for(user_text: str) -> str:
-    """Deterministic voice reply when LLM ignores system prompt."""
-    if _STOP.search(user_text.strip()):
+    """仅在 LLM 完全无输出或崩溃时的真正兜底。"""
+    u = user_text.strip()
+    if _STOP.search(u):
         return "好的。"
-    if _NAME.search(user_text):
-        return "我叫小揽，是你这边的语音助手。"
-    if _CAPABILITY.search(user_text):
-        return "我能跟你聊天，还能帮你看情况。"
-    if _STORY.search(user_text):
-        return _story_fallback(user_text)
-    if _RECITE.search(user_text):
-        return "元素周期表太长了，我没法完整背完。前几个是氢、氦、锂、铍、硼、碳、氮、氧、氟、氖。"
-    if _GREET.search(user_text.strip()):
-        return "你好呀，我是小揽。"
-    return "我是小揽，你的语音助手。"
+    if _PRESENCE.search(u):
+        return "在呢在呢，我一直都在，请问有什么可以帮您的？"
+    return "在呢，请问有什么我可以帮您的吗？"
 
 
 def canned_reply_for(user_text: str) -> str | None:
-    if _STOP.search(user_text.strip()):
+    u = user_text.strip()
+    if _STOP.search(u):
         return "好的。"
-    if _NAME.search(user_text):
-        return "我叫小揽，是你这边的语音助手。"
-    if _CAPABILITY.search(user_text):
-        return "我能跟你聊天，还能帮你看情况。"
-    if _GREET.search(user_text.strip()):
-        return "你好呀，我是小揽。"
+    if _PRESENCE.search(u):
+        return "在呢在呢，我是小揽，随时为您服务！"
     return None
 
 
 def should_skip_llm(user_text: str) -> bool:
-    """Known intents: skip LLM and speak canned reply (saves latency + avoids garbage)."""
     return canned_reply_for(user_text) is not None
 
 
@@ -196,38 +228,62 @@ def pick_first_sentence(text: str) -> str:
     return sents[0] if sents else ""
 
 
-def extract_speak_sentences(text: str, max_cjk: int = 99999) -> list[str]:
-    """Split on 。！？; include trailing fragment. max_cjk>=9999 means no budget cap."""
+def extract_speak_sentences(text: str, max_cjk: int = 99999, *, max_chunk_len: int = 24) -> list[str]:
+    """Split into natural, conversational speakable chunks with proper comma pauses."""
     if max_cjk <= 0:
         return []
     uncapped = max_cjk >= 9999
+
+    # 1. Split on sentence-ending punctuation or newlines
+    raw_parts = re.split(r"([。！？!?\n]+)", text)
+    sentences: list[str] = []
+    for i in range(0, len(raw_parts) - 1, 2):
+        s = raw_parts[i].strip()
+        p = raw_parts[i + 1].strip()
+        if s:
+            sentences.append(s + (p if p in "。！？!?" else "。"))
+    if len(raw_parts) % 2 == 1 and raw_parts[-1].strip():
+        sentences.append(raw_parts[-1].strip() + "。")
+
+    # 2. Refine each sentence with natural comma chunking
     out: list[str] = []
     used = 0
-    consumed = 0
-    for m in _PRIMARY.finditer(text):
-        sent = sanitize_tts_text(m.group(1))
-        consumed = m.end()
-        if not is_speakable(sent):
+    for raw_s in sentences:
+        s_clean = sanitize_tts_text(raw_s)
+        if not is_speakable(s_clean):
             continue
-        n = count_cjk(sent)
-        if not uncapped and used + n > max_cjk:
-            tail = cap_speak_text(sent, max_cjk - used)
-            if tail:
-                out.append(tail)
-            return out
-        out.append(sent)
-        used += n
-    rest = sanitize_tts_text(text[consumed:])
-    # Drop LLM-truncated tail without 。！？ — avoids mid-sentence fragments.
-    if is_speakable(rest) and re.search(r"[。！？!?]$", rest):
-        if uncapped:
-            out.append(rest)
-        elif used + count_cjk(rest) <= max_cjk:
-            out.append(cap_speak_text(rest, max_cjk - used))
-    if not out and text.strip():
-        one = cap_speak_text(text, max_cjk if not uncapped else 99999)
-        if one:
-            out.append(one)
+
+        # If sentence is long and has commas, break at clause boundaries
+        chunks_to_add: list[str] = []
+        if len(s_clean) > max_chunk_len and "，" in s_clean:
+            clauses = s_clean.split("，")
+            buf = ""
+            for c in clauses:
+                c = c.strip("，。！？")
+                if not c:
+                    continue
+                if not buf:
+                    buf = c
+                elif len(buf) + len(c) + 1 <= max_chunk_len:
+                    buf += "，" + c
+                else:
+                    chunks_to_add.append(buf + "。")
+                    buf = c
+            if buf:
+                chunks_to_add.append(buf + "。")
+        else:
+            chunks_to_add.append(s_clean if s_clean.endswith(("。", "！", "？")) else s_clean + "。")
+
+        for chunk in chunks_to_add:
+            n = count_cjk(chunk)
+            if not uncapped and used + n > max_cjk:
+                tail = cap_speak_text(chunk, max_cjk - used)
+                if tail:
+                    out.append(tail)
+                return out
+            out.append(chunk)
+            used += n
+
     return out
 
 

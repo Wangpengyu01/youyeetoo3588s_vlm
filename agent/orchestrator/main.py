@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -356,17 +357,21 @@ class Orchestrator:
         await asyncio.to_thread(llm_clear_history, self.socket_path)
 
     def _build_llm_prompt(self, user_text: str) -> str:
-        parts: list[str] = []
+        prompt = ""
         if self.system_prompt:
-            parts.append(self.system_prompt)
+            prompt += f"<|im_start|>system\n{self.system_prompt.strip()}<|im_end|>\n"
         for user, assistant in self._chat_turns[-self.history_max_turns :]:
-            parts.append(f"用户：{user}\n小揽：{assistant}")
-        parts.append(f"用户：{user_text}\n小揽：")
-        return "\n\n".join(parts)
+            prompt += f"<|im_start|>user\n{user.strip()}<|im_end|>\n<|im_start|>assistant\n{assistant.strip()}<|im_end|>\n"
+        prompt += f"<|im_start|>user\n{user_text.strip()}<|im_end|>\n<|im_start|>assistant\n"
+        return prompt
 
     def _record_chat_turn(self, user: str, assistant: str) -> None:
         text = assistant.strip()
         if not text:
+            return
+        if self._chat_turns and self._chat_turns[-1][1].strip() == text:
+            LOG.warning("[llm] repetition detected in record_turn, wiping history")
+            self._chat_turns.clear()
             return
         self._chat_turns.append((user, text))
         if len(self._chat_turns) > self.history_max_turns:
@@ -380,6 +385,13 @@ class Orchestrator:
     async def _run_llm(self, prompt: str) -> None:
         user_prompt = prompt
         self.set_state(AgentState.LLM)
+
+        if re.search(r"^(重置|重新开始|清空历史|刷新|重新聊|别说了|闭嘴|算了|打住)[了]?$", user_prompt.strip()):
+            self._chat_turns.clear()
+            await asyncio.to_thread(llm_clear_history, self.socket_path)
+            LOG.info("[llm] user requested session reset")
+            await self._speak_turn("好的，已为您重置对话，我们重新开始吧！")
+            return
 
         if should_skip_llm(user_prompt):
             speak = canned_reply_for(user_prompt) or persona_reply_for(user_prompt)
@@ -397,15 +409,12 @@ class Orchestrator:
             user_prompt[:48],
         )
         buffer = {"text": ""}
-        turn_tainted = {"v": False}
         loop = asyncio.get_running_loop()
 
         def on_token(piece: str) -> None:
             if self._tts_abort:
                 return
             buffer["text"] += piece
-            if is_robotic_reply(buffer["text"]):
-                turn_tainted["v"] = True
             asyncio.run_coroutine_threadsafe(
                 self.emit({"type": "llm_token", "text": piece}),
                 loop,
@@ -420,13 +429,14 @@ class Orchestrator:
                 max_new_tokens=self.max_new_tokens,
             )
             full = clean_llm_reply(user_prompt, reply["text"])
-            need_fallback = (
-                not full.strip()
-                or turn_tainted["v"]
-                or is_robotic_reply(full)
-                or is_spurious_name_reply(user_prompt, full)
-                or is_off_topic_reply(user_prompt, full)
-            )
+
+            # 循环重复死锁破除：如果回答与上一轮一模一样，或者重复上一句
+            if self._chat_turns and full.strip() and full.strip() == self._chat_turns[-1][1].strip():
+                LOG.warning("[llm] detected repetition loop with previous turn: %s, breaking out", full[:40])
+                self._chat_turns.clear()
+                full = "在呢，请问有什么我可以帮您的吗？"
+
+            need_fallback = not full.strip()
             spoken = ""
             if not self._tts_abort and need_fallback:
                 await self.tts_queue.discard_pending()
@@ -442,8 +452,8 @@ class Orchestrator:
             LOG.info(
                 "[llm] reply (%d chars, ttft=%.3fs): %s",
                 len(full),
-                reply.get("ttft_s") or 0,
-                full[:120],
+                reply.get("ttft_s") or 0.0,
+                full[:60],
             )
             if self._tts_abort:
                 LOG.info("[barge-in] skipped post-abort cooldown")

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Start InternVL3.5-4B LLM-only daemon on board (Phase A)
-set -euo pipefail
+set -e
 
 AGENT_ROOT="${AGENT_ROOT:-/userdata/agent}"
 BIN="${AGENT_ROOT}/bin/llm_daemon"
@@ -34,7 +34,7 @@ nohup "${BIN}" \
 echo $! >"${PIDFILE}"
 echo "[start] llm_daemon pid=$(cat "${PIDFILE}") log=${LOG} sock=${SOCK}"
 
-for _ in $(seq 1 60); do
+for _ in $(seq 1 120); do
   if [[ -S "${SOCK}" ]]; then
     chmod 777 "${SOCK}" 2>/dev/null || true
     echo "[start] socket ready"
