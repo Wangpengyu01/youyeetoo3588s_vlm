@@ -20,24 +20,33 @@ LETTER_MAP = {
 }
 
 COMMON_EN = [
-    (r"\b(hello|hi)\b", "哈喽"),
-    (r"\bok(ay)?\b", "好的"),
-    (r"\b(bye|goodbye)\b", "再见"),
-    (r"\b(yes|yeah)\b", "是的"),
-    (r"\bno\b", "不"),
-    (r"\bgood\b", "好"),
-    (r"\bai\b", "人工智能"),
-    (r"\bapp\b", "应用"),
-    (r"\bapi\b", "接口"),
-    (r"\bintern-?s1\b", "小揽"),
-    (r"\bintern\b", "小揽"),
-    (r"\br1\b", "阿尔一"),
-    (r"\bcpu\b", "处理器"),
-    (r"\bgpu\b", "显卡"),
-    (r"\bnpu\b", "神经网络处理器"),
-    (r"\busb\b", "优盘"),
-    (r"\bwifi\b", "无线网"),
+    (r"(?<![A-Za-z])(hello|hi)(?![A-Za-z])", "哈喽"),
+    (r"(?<![A-Za-z])ok(ay)?(?![A-Za-z])", "好的"),
+    (r"(?<![A-Za-z])(bye|goodbye)(?![A-Za-z])", "再见"),
+    (r"(?<![A-Za-z])(yes|yeah)(?![A-Za-z])", "是的"),
+    (r"(?<![A-Za-z])no(?![A-Za-z])", "不"),
+    (r"(?<![A-Za-z])good(?![A-Za-z])", "好"),
+    (r"(?<![A-Za-z])ai(?![A-Za-z])", "人工智能"),
+    (r"(?<![A-Za-z])app(?![A-Za-z])", "应用"),
+    (r"(?<![A-Za-z])api(?![A-Za-z])", "接口"),
+    (r"(?<![A-Za-z])intern-?s1(?![A-Za-z])", "小揽"),
+    (r"(?<![A-Za-z])intern(?![A-Za-z])", "小揽"),
+    (r"(?<![A-Za-z])r1(?![A-Za-z])", "阿尔一"),
+    (r"(?<![A-Za-z])cpu(?![A-Za-z])", "处理器"),
+    (r"(?<![A-Za-z])gpu(?![A-Za-z])", "显卡"),
+    (r"(?<![A-Za-z])tpu(?![A-Za-z])", "张量处理器"),
+    (r"(?<![A-Za-z])npu(?![A-Za-z])", "神经网络处理器"),
+    (r"(?<![A-Za-z])usb(?![A-Za-z])", "优盘"),
+    (r"(?<![A-Za-z])wifi(?![A-Za-z])", "无线网"),
 ]
+
+KNOWN_ACRONYMS = {
+    "AI", "CPU", "GPU", "NPU", "TPU", "RAM", "ROM", "USB", "WIFI", "LED",
+    "API", "APP", "SDK", "OS", "PC", "VAD", "ASR", "TTS", "LLM", "VLM",
+    "OK", "ID", "IP", "DNS", "URL", "HTTP", "HTTPS", "TCP", "UDP", "HTML",
+    "PDF", "MP3", "MP4", "WAV", "GPS", "SOS", "VIP", "SIM", "DIY", "KFC",
+    "BMW", "BYD", "DJI", "QQ", "R1", "S1", "3D", "4G", "5G"
+}
 
 _DIGIT_MAP = str.maketrans("0123456789", "零一二三四五六七八九")
 _MIN_SPOKEN_CHARS = 2
@@ -48,14 +57,26 @@ def transliterate_en(text: str) -> str:
     for pattern, rep in COMMON_EN:
         text = re.sub(pattern, rep, text, flags=re.IGNORECASE)
 
+    def repl_acronym(m: re.Match[str]) -> str:
+        word = m.group(0).upper()
+        if word in KNOWN_ACRONYMS:
+            return "".join(LETTER_MAP.get(c, c) for c in word)
+        return ""  # Drop unknown multi-letter English words like 'think', 'null'
+
+    text = re.sub(r"(?<![A-Za-z])[A-Za-z]{2,}(?![A-Za-z])", repl_acronym, text)
+
     def repl_letter(m: re.Match[str]) -> str:
         ch = m.group(0).upper()
-        return LETTER_MAP.get(ch, ch)
+        return LETTER_MAP.get(ch, "")
 
     return re.sub(r"[A-Za-z]", repl_letter, text)
 
 
 def sanitize_tts_text(text: str) -> str:
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"</?think>", "", text)
+    text = re.sub(r"<.*?>", "", text)
+    text = re.sub(r"<\|.*?\|>", "", text)
     text = _MD_BOLD.sub(r"\1", text)
     text = _MD_LIST.sub("，", text)
     text = _MD_NUM_LIST.sub("，", text)
@@ -64,7 +85,6 @@ def sanitize_tts_text(text: str) -> str:
     # LLM 常复读 prompt 里的「小揽：」前缀或标记
     text = re.sub(r"^小揽[：:]\s*", "", text)
     text = re.sub(r"<\|im_end\|>.*", "", text)
-    text = re.sub(r"<\|.*?\|>", "", text)
     text = re.sub(r"三[Dd]?打印", "三维打印", text, flags=re.IGNORECASE)
     # 冒号、分号转逗号停顿，换行转句号
     text = re.sub(r"[：:；;]+", "，", text)
@@ -291,9 +311,9 @@ def flush_remainder(buffer: str) -> list[str]:
 
 
 class StreamingSentenceSplitter:
-    """Consumes LLM tokens in real-time, emitting speakable clauses/sentences as early as possible."""
+    """Consumes LLM tokens in real-time, emitting speakable clauses/sentences naturally without word chopping."""
 
-    def __init__(self, min_clause_chars: int = 8, max_clause_chars: int = 24):
+    def __init__(self, min_clause_chars: int = 7, max_clause_chars: int = 26):
         self.min_clause_chars = min_clause_chars
         self.max_clause_chars = max_clause_chars
         self._buf = ""
@@ -314,57 +334,93 @@ class StreamingSentenceSplitter:
         # Strip prefixes and special tokens
         self._buf = re.sub(r"^小揽[：:]\s*", "", self._buf)
         self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
+        self._buf = re.sub(r"</?think>", "", self._buf)
 
         chunks: list[str] = []
-        # Natural Clause Split: require at least 8 characters before comma split to prevent isolated short subjects
-        curr_min = 8 if not self._first_chunk_emitted else self.min_clause_chars
-        curr_max = 24 if not self._first_chunk_emitted else self.max_clause_chars
+        curr_min = 6 if not self._first_chunk_emitted else self.min_clause_chars
+        curr_max = self.max_clause_chars
 
         while True:
-            # 1. Check for sentence-ending punctuation (。！？!?\n)
-            m = re.search(r"[。！？!?\n]+", self._buf)
-            if m:
-                end_pos = m.end()
-                raw_chunk = self._buf[:end_pos].strip()
-                self._buf = self._buf[end_pos:]
+            # 1. Check for full sentence-ending punctuation (。！？!?\n)
+            m_full = re.search(r"[。！？!?\n]+", self._buf)
+            cut_pos = -1
+            cut_end = -1
+            is_clause = False
+
+            if m_full:
+                full_pos = m_full.start()
+                if full_pos <= curr_max:
+                    cut_pos = full_pos
+                    cut_end = m_full.end()
+                    is_clause = False
+                else:
+                    # Sentence is long, search for a comma before curr_max that is >= curr_min
+                    best_comma = None
+                    for m in re.finditer(r"[，,；;、：:]+", self._buf[:full_pos]):
+                        if m.start() >= curr_min and m.start() <= curr_max:
+                            best_comma = m
+                    if best_comma:
+                        cut_pos = best_comma.start()
+                        cut_end = best_comma.end()
+                        is_clause = True
+                    else:
+                        for m in re.finditer(r"[，,；;、：:]+", self._buf[:full_pos]):
+                            if m.start() >= 5:
+                                best_comma = m
+                        if best_comma:
+                            cut_pos = best_comma.start()
+                            cut_end = best_comma.end()
+                            is_clause = True
+                        else:
+                            cut_pos = full_pos
+                            cut_end = m_full.end()
+                            is_clause = False
+            else:
+                # No full stop yet. Only split on comma if buffer is getting long enough
+                best_comma = None
+                for m in re.finditer(r"[，,；;、：:]+", self._buf):
+                    if m.start() >= curr_min:
+                        best_comma = m
+                        if (not self._first_chunk_emitted and m.start() >= curr_min) or m.start() >= 10 or len(self._buf) >= curr_max:
+                            break
+
+                if best_comma:
+                    if (not self._first_chunk_emitted and best_comma.start() >= curr_min) or best_comma.start() >= 10 or len(self._buf) >= curr_max:
+                        cut_pos = best_comma.start()
+                        cut_end = best_comma.end()
+                        is_clause = True
+
+            if cut_pos >= 0:
+                raw_chunk = self._buf[:cut_end].strip()
+                self._buf = self._buf[cut_end:]
                 clean = sanitize_tts_text(raw_chunk)
                 if is_speakable(clean):
-                    if not clean.endswith(("。", "！", "？")):
-                        clean += "。"
+                    if is_clause:
+                        if not clean.endswith(("。", "！", "？", "，")):
+                            clean += "，"
+                    else:
+                        if not clean.endswith(("。", "！", "？")):
+                            clean += "。"
                     chunks.append(clean)
                     self._first_chunk_emitted = True
                     curr_min = self.min_clause_chars
-                    curr_max = self.max_clause_chars
                 continue
 
-            # 2. Check for clause boundaries (，,；;、) when buffer has enough characters
-            m_comma = re.search(r"[，,；;、]+", self._buf)
-            if m_comma and m_comma.start() >= curr_min:
-                end_pos = m_comma.end()
-                raw_chunk = self._buf[:end_pos].strip()
-                self._buf = self._buf[end_pos:]
+            # Fallback only when buffer exceeds 36 chars without ANY punctuation
+            if len(self._buf) >= 36:
+                m_con = re.search(r"(以及|并且|而且|但是|不过|然而|同时|因此|所以|包括|使得|导致)", self._buf[12:32])
+                if m_con:
+                    split_idx = 12 + m_con.start()
+                    raw_chunk = self._buf[:split_idx].strip()
+                    self._buf = self._buf[split_idx:]
+                else:
+                    raw_chunk = self._buf[:26].strip()
+                    self._buf = self._buf[26:]
                 clean = sanitize_tts_text(raw_chunk)
                 if is_speakable(clean):
-                    if not clean.endswith(("。", "！", "？", "，")):
-                        clean += "，"
+                    clean += "，"
                     chunks.append(clean)
                     self._first_chunk_emitted = True
-                    curr_min = self.min_clause_chars
-                    curr_max = self.max_clause_chars
-                continue
-
-            # 3. Buffer length safety cap (forces first chunk at curr_max for instant TTFT speech)
-            if len(self._buf) >= curr_max:
-                raw_chunk = self._buf[:curr_max].strip()
-                self._buf = self._buf[curr_max:]
-                clean = sanitize_tts_text(raw_chunk)
-                if is_speakable(clean):
-                    if not clean.endswith(("。", "！", "？", "，")):
-                        clean += "，"
-                    chunks.append(clean)
-                    self._first_chunk_emitted = True
-                    curr_min = self.min_clause_chars
-                    curr_max = self.max_clause_chars
                 continue
 
             break
@@ -372,10 +428,13 @@ class StreamingSentenceSplitter:
         return chunks
 
     def finish(self) -> list[str]:
-        if not self._buf.strip():
+        if self._think_active:
+            self._buf = ""
             return []
         raw = self._buf.strip()
         self._buf = ""
+        raw = re.sub(r"</?think>", "", raw)
+        raw = re.sub(r"<.*?>", "", raw)
         clean = sanitize_tts_text(raw)
         if is_speakable(clean):
             if not clean.endswith(("。", "！", "？")):

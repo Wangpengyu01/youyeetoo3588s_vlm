@@ -232,9 +232,15 @@ class Orchestrator:
         self._tts_abort = True
         self._listen_cooldown_until = 0.0
         pending = await self.tts_queue.interrupt()
-        if pending:
-            self._paused_relay_text = "".join(pending).strip()
-            LOG.info("[relay] saved %d pending clauses (%d chars) for resume: %s", len(pending), len(self._paused_relay_text), self._paused_relay_text[:40])
+        relay_parts = list(pending)
+        if getattr(self, "_current_splitter", None):
+            rem = self._current_splitter.finish()
+            for r in rem:
+                if r not in relay_parts:
+                    relay_parts.append(r)
+        if relay_parts:
+            self._paused_relay_text = "".join(relay_parts).strip()
+            LOG.info("[relay] saved %d pending clauses (%d chars) for resume: %s", len(relay_parts), len(self._paused_relay_text), self._paused_relay_text[:40])
         await self.emit({"type": "barge_in", "phase": "tts"})
 
     async def run_vad_loop(self, inject_wav: str | None = None) -> None:
@@ -409,17 +415,23 @@ class Orchestrator:
 
         u_clean = user_prompt.strip()
 
-        # 1. 检查是否为“继续 / 接着说 / 然后呢 / 往下说”等接力指令
-        RESUME_PAT = re.compile(r"^(继续|接着说|然后呢|往下说|接着讲|继续讲|继续说|还有呢|你接着说|你继续|接力)[吧呀啊呢了]?$")
-        if RESUME_PAT.search(u_clean) and getattr(self, "_paused_relay_text", None):
-            relay = self._paused_relay_text
-            self._paused_relay_text = None
-            LOG.info("[relay] resuming playback from paused sentences (%d chars): %s", len(relay), relay[:60])
-            await self._speak_turn(relay)
-            return
+        # 1. 检查是否为“继续 / 接着说 / 然后呢 / 往下说 / 你说 / 说”等接力指令
+        RESUME_PAT = re.compile(
+            r"^(好[的了]|行[的了]|那|可以|请)?\s*(你)?\s*(继续|接着说|然后呢|往下说|接着讲|继续讲|继续说|还有呢|你接着说|你继续|接力|你说|你说吧|说吧|你讲|讲吧|说|讲|说下去|接下去说|接力说|继续接力|往下讲|接下来说)[吧呀啊呢了哦嘛]*$"
+        )
+        if RESUME_PAT.search(u_clean):
+            if getattr(self, "_paused_relay_text", None):
+                relay = self._paused_relay_text
+                self._paused_relay_text = None
+                LOG.info("[relay] resuming playback from paused sentences (%d chars): %s", len(relay), relay[:60])
+                await self._speak_turn(relay)
+                return
+            elif not self._chat_turns:
+                await self._speak_turn("在呢，请问有什么想让我讲的吗？")
+                return
 
         # 2. 检查是否为“停 / 暂停 / 别说了 / 闭嘴 / 打住”等停止指令
-        STOP_PAT = re.compile(r"(停|暂停|别说了|闭嘴|算了|打住|停止|停下|别讲|不要说|闭上嘴|别出声|安静|停一下)")
+        STOP_PAT = re.compile(r"(停|暂停|别说了|闭嘴|算了|打住|停止|停下|别讲|不要说|闭上嘴|别出声|安静|停一下|等等|等一下)")
         if STOP_PAT.search(u_clean):
             LOG.info("[llm] user requested stop: %s (saved relay: %s)", u_clean, bool(getattr(self, "_paused_relay_text", None)))
             await self._speak_turn("好的。")
@@ -450,7 +462,8 @@ class Orchestrator:
         )
         buffer = {"text": ""}
         loop = asyncio.get_running_loop()
-        splitter = StreamingSentenceSplitter(min_clause_chars=8, max_clause_chars=22)
+        splitter = StreamingSentenceSplitter(min_clause_chars=7, max_clause_chars=26)
+        self._current_splitter = splitter
         tts_state: dict[str, int | bool] = {"n": 0, "canned": False}
 
         def on_token(piece: str) -> None:
@@ -512,6 +525,8 @@ class Orchestrator:
                 LOG.info("[barge-in] skipped post-abort cooldown")
         except OSError as exc:
             LOG.error("[llm] request failed: %s", exc)
+        finally:
+            self._current_splitter = None
 
     async def run(self, inject_wav: str | None = None) -> None:
         self._loop = asyncio.get_running_loop()
