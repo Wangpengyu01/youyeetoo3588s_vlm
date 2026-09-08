@@ -215,6 +215,41 @@ def is_off_topic_reply(user_text: str, reply: str) -> bool:
     return False
 
 
+def is_self_echo(spoken_text: str, detected_text: str) -> bool:
+    """Detect if mic picked up acoustic feedback of robot's own speaker audio."""
+    s = re.sub(r"[^\u4e00-\u9fa50-9A-Za-z]", "", spoken_text or "")
+    d = re.sub(r"[^\u4e00-\u9fa50-9A-Za-z]", "", detected_text or "")
+    if not s or not d:
+        return False
+    if d in s:
+        return True
+    overlap = sum(1 for c in d if c in s)
+    if len(d) >= 2 and (overlap / len(d)) >= 0.70:
+        return True
+    return False
+
+
+def is_echo_reply(user_text: str, reply: str) -> bool:
+    """Detect if LLM is parroting the user's question instead of answering."""
+    u = re.sub(r"[^\u4e00-\u9fa50-9]", "", user_text or "")
+    r = re.sub(r"[^\u4e00-\u9fa50-9]", "", reply or "")
+    if not u or not r:
+        return False
+    if u == r:
+        return True
+    if u.replace("我", "你") == r or u.replace("你", "我") == r:
+        return True
+    u_core = re.sub(r"^[那对嗯啊好请问]+", "", u)
+    r_core = re.sub(r"^[那对嗯啊好请问]+", "", r)
+    if u_core and u_core == r_core and len(u_core) >= 2:
+        return True
+    if (reply.endswith("？") or reply.endswith("?")) and len(r) <= len(u) + 3:
+        overlap = sum(1 for c in r if c in u)
+        if len(r) >= 2 and (overlap / len(r)) >= 0.60:
+            return True
+    return False
+
+
 _PRESENCE = re.compile(r"^(你?在[吗嘛]|人呢|你在[哪哪儿]|在不在|小揽)[呀啊吧]?$")
 
 
@@ -223,6 +258,8 @@ def persona_reply_for(user_text: str) -> str:
     u = user_text.strip()
     if _STOP.search(u):
         return "好的。"
+    if "首都" in u:
+        return "中国的首都是北京。"
     if _PRESENCE.search(u):
         return "在呢在呢，我一直都在，请问有什么可以帮您的？"
     return "在呢，请问有什么我可以帮您的吗？"

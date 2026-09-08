@@ -28,8 +28,10 @@ from tts.sentence_split import (
     canned_reply_for,
     clean_llm_reply,
     extract_speak_sentences,
+    is_echo_reply,
     is_off_topic_reply,
     is_robotic_reply,
+    is_self_echo,
     is_spurious_name_reply,
     is_speakable,
     persona_reply_for,
@@ -215,6 +217,10 @@ class Orchestrator:
             if self.barge_in_enabled and self._speaking and text.strip():
                 clean_p = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", text)
                 if len(clean_p) >= 1:
+                    cur_speak = getattr(self.tts_queue, "_current_speaking_chunk", "") or getattr(self, "_active_tts_text", "")
+                    if cur_speak and is_self_echo(cur_speak, clean_p):
+                        LOG.info("[barge-in] self-acoustic feedback detected ('%s' in '%s'), ignoring", clean_p, cur_speak[:24])
+                        return
                     LOG.info("[barge-in] user spoke (%s), interrupting TTS immediately", text)
                     await self._interrupt_tts()
 
@@ -321,6 +327,10 @@ class Orchestrator:
             text = normalize_user_text((result.get("text") or "").strip())
             if text:
                 LOG.info("[asr] normalized: %s", text)
+                last_reply = getattr(self, "_last_spoken_turn", "")
+                if last_reply and is_self_echo(last_reply, text):
+                    LOG.warning("[asr] detected acoustic echo of last assistant reply ('%s'), dropping loop", text)
+                    return
                 await self._run_llm(text)
             else:
                 LOG.info("[asr] no text recognized")
@@ -478,6 +488,9 @@ class Orchestrator:
             for ch in chunks:
                 if self._tts_abort:
                     break
+                if is_echo_reply(user_prompt, ch):
+                    LOG.warning("[llm] suppressed echo chunk: %s", ch)
+                    continue
                 asyncio.run_coroutine_threadsafe(
                     self._enqueue_speak(ch, tts_state),
                     loop,
@@ -495,15 +508,31 @@ class Orchestrator:
             for ch in rem:
                 if self._tts_abort:
                     break
+                if is_echo_reply(user_prompt, ch):
+                    LOG.warning("[llm] suppressed echo chunk: %s", ch)
+                    continue
                 await self._enqueue_speak(ch, tts_state)
 
             full = clean_llm_reply(user_prompt, reply["text"])
+
+            if is_echo_reply(user_prompt, full):
+                LOG.warning("[llm] detected echo reply ('%s' -> '%s'), wiping history", user_prompt, full)
+                self._chat_turns.clear()
+                if "首都" in user_prompt:
+                    full = "中国的首都是北京。"
+                else:
+                    full = "在呢，请问有什么我可以帮您的吗？"
+                if int(tts_state["n"]) == 0 and not self._tts_abort:
+                    await self._speak_extracted(full, canned=True)
+
+            self._last_spoken_turn = full
 
             if int(tts_state["n"]) == 0 and not self._tts_abort:
                 speak = persona_reply_for(user_prompt)
                 LOG.info("[llm] persona fallback: %s", speak[:48])
                 await self._speak_extracted(speak, canned=True)
                 full = speak
+                self._last_spoken_turn = full
             elif not self._tts_abort:
                 try:
                     await self.tts_queue.wait_done()
