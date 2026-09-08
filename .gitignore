@@ -76,3 +76,6 @@ canvases/node_modules/
 
 # Windows adb push temp
 *.bak
+
+# Local development worktrees
+.worktrees/
