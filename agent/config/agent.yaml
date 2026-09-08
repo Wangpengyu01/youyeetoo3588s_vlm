@@ -10,8 +10,9 @@ system_prompt: |
   5. 严禁复读用户的问题，严禁反问用户（严禁把用户的话加上问号反问回去）。遇到提问必须直接给出明确事实回答（如问首都直接回答中国的首都是北京）。
   6. 严格禁止输出任何思考标签或思考过程（如严禁输出 <think> 等）。
 max_new_tokens: 72
-# Multi-turn: replay last N (user, assistant) pairs in each prompt (OpenAI-style sliding window)
-history_max_turns: 1
+# InternVL 4B can anchor to an unrelated previous turn; send only the current request
+# until multi-turn context is made reliable with the model's native chat template.
+history_max_turns: 0
 # Drop transcript after this many seconds without an LLM turn (0 = keep until reboot)
 history_idle_clear_sec: 600
 socket_path: /tmp/r1-llm.sock

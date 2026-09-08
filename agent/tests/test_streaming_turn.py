@@ -29,6 +29,29 @@ class FakeTtsQueue:
 
 
 class StreamingTurnTests(unittest.IsolatedAsyncioTestCase):
+    def test_zero_history_omits_prior_turns_from_the_llm_prompt(self) -> None:
+        orch = object.__new__(Orchestrator)
+        orch.system_prompt = "只回答当前问题。"
+        orch._chat_turns = [("走路还是开车", "你可以骑车。")]
+        orch.history_max_turns = 0
+
+        prompt = orch._build_llm_prompt("我要去洗车")
+
+        self.assertEqual(
+            prompt,
+            "<|im_start|>system\n只回答当前问题。<|im_end|>\n"
+            "<|im_start|>user\n我要去洗车<|im_end|>\n<|im_start|>assistant\n",
+        )
+
+    def test_zero_history_does_not_accumulate_transcript(self) -> None:
+        orch = object.__new__(Orchestrator)
+        orch._chat_turns = [("旧问题", "旧回答")]
+        orch.history_max_turns = 0
+
+        orch._record_chat_turn("新问题", "新回答")
+
+        self.assertEqual(orch._chat_turns, [])
+
     def test_stream_loop_handles_the_asyncio_timeout_class_used_by_python_310(self) -> None:
         source = inspect.getsource(Orchestrator._run_llm)
         self.assertIn("except asyncio.TimeoutError:", source)

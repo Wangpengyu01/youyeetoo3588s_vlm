@@ -507,12 +507,16 @@ class Orchestrator:
         prompt = ""
         if self.system_prompt:
             prompt += f"<|im_start|>system\n{self.system_prompt.strip()}<|im_end|>\n"
-        for user, assistant in self._chat_turns[-self.history_max_turns :]:
-            prompt += f"<|im_start|>user\n{user.strip()}<|im_end|>\n<|im_start|>assistant\n{assistant.strip()}<|im_end|>\n"
+        if self.history_max_turns > 0:
+            for user, assistant in self._chat_turns[-self.history_max_turns :]:
+                prompt += f"<|im_start|>user\n{user.strip()}<|im_end|>\n<|im_start|>assistant\n{assistant.strip()}<|im_end|>\n"
         prompt += f"<|im_start|>user\n{user_text.strip()}<|im_end|>\n<|im_start|>assistant\n"
         return prompt
 
     def _record_chat_turn(self, user: str, assistant: str) -> None:
+        if self.history_max_turns <= 0:
+            self._chat_turns.clear()
+            return
         text = assistant.strip()
         if not text:
             return

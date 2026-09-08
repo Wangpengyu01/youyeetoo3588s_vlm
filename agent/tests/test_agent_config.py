@@ -16,6 +16,10 @@ class AgentConfigTests(unittest.TestCase):
         cfg = load_yaml(AGENT_ROOT / "config" / "agent.yaml")
         self.assertEqual(cfg["vad"]["mute_mic_during_tts"], "true")
 
+    def test_default_mode_omits_unreliable_llm_history(self) -> None:
+        cfg = load_yaml(AGENT_ROOT / "config" / "agent.yaml")
+        self.assertEqual(cfg["history_max_turns"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
