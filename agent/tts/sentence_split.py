@@ -76,10 +76,9 @@ def sanitize_tts_text(text: str) -> str:
     # 过滤无法发音的符号
     text = re.sub(r"[-—–\.．\(\)（）【】\[\]「」\"\"\'\'·=]+", "", text)
     text = re.sub(r"[^\u4e00-\u9fff。！？，]", "", text)
-    text = re.sub(r"[，]{2,}", "，", text)
     text = re.sub(r"[，。！？]+([。！？])", r"\1", text)
     text = re.sub(r"^[，。！？]+", "", text)
-    text = re.sub(r"[，]+$", "。", text)
+    text = re.sub(r"[，]{2,}", "，", text)
     return text.strip()
 
 
@@ -317,9 +316,9 @@ class StreamingSentenceSplitter:
         self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
 
         chunks: list[str] = []
-        # Fast First Chunk: first sentence uses ultra-short threshold (4-7 chars) for instant sub-second speech
-        curr_min = 4 if not self._first_chunk_emitted else self.min_clause_chars
-        curr_max = 7 if not self._first_chunk_emitted else self.max_clause_chars
+        # Fast First Chunk: first sentence uses natural 6-10 char clause threshold to preserve 2-char words
+        curr_min = 6 if not self._first_chunk_emitted else self.min_clause_chars
+        curr_max = 10 if not self._first_chunk_emitted else self.max_clause_chars
 
         while True:
             # 1. Check for sentence-ending punctuation (。！？!?\n)
