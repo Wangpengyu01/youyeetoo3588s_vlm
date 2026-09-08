@@ -300,6 +300,7 @@ class StreamingSentenceSplitter:
         self.max_clause_chars = max_clause_chars
         self._buf = ""
         self._think_active = False
+        self._first_chunk_emitted = False
 
     def feed(self, piece: str) -> list[str]:
         self._buf += piece
@@ -317,6 +318,10 @@ class StreamingSentenceSplitter:
         self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
 
         chunks: list[str] = []
+        # Fast First Chunk: first sentence uses shorter threshold for instant speech
+        curr_min = 5 if not self._first_chunk_emitted else self.min_clause_chars
+        curr_max = 12 if not self._first_chunk_emitted else self.max_clause_chars
+
         while True:
             # 1. Check for sentence-ending punctuation (。！？!?\n)
             m = re.search(r"[。！？!?\n]+", self._buf)
@@ -329,11 +334,14 @@ class StreamingSentenceSplitter:
                     if not clean.endswith(("。", "！", "？")):
                         clean += "。"
                     chunks.append(clean)
+                    self._first_chunk_emitted = True
+                    curr_min = self.min_clause_chars
+                    curr_max = self.max_clause_chars
                 continue
 
             # 2. Check for clause boundaries (，,；;) when buffer has enough characters
             m_comma = re.search(r"[，,；;]+", self._buf)
-            if m_comma and m_comma.start() >= self.min_clause_chars:
+            if m_comma and m_comma.start() >= curr_min:
                 end_pos = m_comma.end()
                 raw_chunk = self._buf[:end_pos].strip()
                 self._buf = self._buf[end_pos:]
@@ -342,17 +350,23 @@ class StreamingSentenceSplitter:
                     if not clean.endswith(("。", "！", "？", "，")):
                         clean += "。"
                     chunks.append(clean)
+                    self._first_chunk_emitted = True
+                    curr_min = self.min_clause_chars
+                    curr_max = self.max_clause_chars
                 continue
 
-            # 3. Buffer length safety cap
-            if len(self._buf) >= self.max_clause_chars:
-                raw_chunk = self._buf[: self.max_clause_chars].strip()
-                self._buf = self._buf[self.max_clause_chars :]
+            # 3. Buffer length safety cap (forces first chunk at curr_max for instant TTFT speech)
+            if len(self._buf) >= curr_max:
+                raw_chunk = self._buf[:curr_max].strip()
+                self._buf = self._buf[curr_max:]
                 clean = sanitize_tts_text(raw_chunk)
                 if is_speakable(clean):
                     if not clean.endswith(("。", "！", "？")):
                         clean += "。"
                     chunks.append(clean)
+                    self._first_chunk_emitted = True
+                    curr_min = self.min_clause_chars
+                    curr_max = self.max_clause_chars
                 continue
 
             break

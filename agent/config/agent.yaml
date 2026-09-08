@@ -19,7 +19,7 @@ vad:
   sample_rate: 16000
   chunk_ms: 100
   threshold: 0.5
-  min_silence_duration: 0.45
+  min_silence_duration: 0.35
   min_speech_duration: 0.20
   max_speech_duration: 30.0
   min_segment_sec: 0.5
@@ -65,8 +65,8 @@ tts:
   vocoder: /userdata/voice/vocos-22khz-univ.onnx
   sherpa_bin: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/bin/sherpa-onnx-offline-tts
   sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
-  num_threads: 2
-  speed: 1.0
+  num_threads: 4
+  speed: 1.05
   max_chars: 160
   merge_max_chars: 80
 
