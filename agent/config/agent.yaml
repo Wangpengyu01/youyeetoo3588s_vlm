@@ -33,6 +33,7 @@ vad:
   arecord_period_size: 320
   arecord_buffer_size: 2560
   mic_capture_gain: 8
+  mute_mic_during_tts: true
 
 barge_in:
   enabled: true

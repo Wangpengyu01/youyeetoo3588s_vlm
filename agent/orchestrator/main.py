@@ -107,6 +107,7 @@ class Orchestrator:
         )
         self.listen_cooldown_sec = float(vad_cfg.get("listen_cooldown_sec", 0.5))
         self.listen_cooldown_skip_max_sec = float(vad_cfg.get("listen_cooldown_skip_max_sec", 0.45))
+        self.mute_mic_during_tts = str(vad_cfg.get("mute_mic_during_tts", "true")).lower() not in ("0", "false", "no")
 
         utterance = paths.get("utterance_wav", str(agent_root / "run" / "last_utterance.wav"))
         asr_backend = str(asr_cfg.get("backend", "sense_voice")).strip().lower()
@@ -316,6 +317,11 @@ class Orchestrator:
                 break
             if etype == "error":
                 LOG.error("[event] %s", event)
+                continue
+            if self.mute_mic_during_tts and self._speaking:
+                if self._asr_session:
+                    asyncio.create_task(self._asr_session.cancel())
+                    self._asr_session = None
                 continue
             if etype == "speech_start":
                 LOG.info("[event] speech_start")
