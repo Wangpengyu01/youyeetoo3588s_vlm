@@ -73,20 +73,29 @@ class _StreamingParaformerBackend:
         self.recognizer = recognizer
         self.sample_rate = sample_rate
         self._buffer: list[float] = []
+        self._fed_samples: int = 0
 
     def reset(self) -> None:
         self._buffer.clear()
+        self._fed_samples = 0
         self.recognizer.reset()
 
     def feed(self, samples: list[float], sample_rate: int) -> str:
         self._buffer.extend(samples)
+        self._fed_samples += len(samples)
         if not samples:
             return ""
         return self.recognizer.feed(samples, sample_rate).strip()
 
     def finalize(self, samples: list[float], sample_rate: int) -> str:
         buf = list(samples) if samples else self._buffer
-        if buf:
+        if self._fed_samples > 0 and self._fed_samples <= len(buf):
+            remaining = buf[self._fed_samples :]
+            if remaining:
+                chunk = max(1, int(sample_rate * 0.2))
+                for i in range(0, len(remaining), chunk):
+                    self.recognizer.feed(remaining[i : i + chunk], sample_rate)
+        elif buf:
             self.recognizer.reset()
             chunk = max(1, int(sample_rate * 0.2))
             for i in range(0, len(buf), chunk):
@@ -151,11 +160,9 @@ class StreamingAsrSession:
         if not self._active or not samples:
             return
         self._buffer.extend(samples)
-        if not self.engine.cfg.partial_enabled:
-            return
         if self._streaming:
-            await self._streaming_partial(samples)
-        else:
+            await self._streaming_feed(samples)
+        elif self.engine.cfg.partial_enabled:
             asyncio.create_task(self._maybe_partial_offline())
 
     async def cancel(self) -> None:
@@ -229,34 +236,26 @@ class StreamingAsrSession:
         await asyncio.to_thread(self.engine._backend_impl.reset)
         return result
 
-    async def _streaming_partial(self, samples: list[float]) -> None:
+    async def _streaming_feed(self, samples: list[float]) -> None:
         cfg = self.engine.cfg
-        if self._partial_running:
-            return
-        if self._partial_count >= cfg.max_partials_per_utterance:
-            return
-        if self.buffer_sec < cfg.partial_min_sec:
-            return
-        now = time.monotonic()
-        if now - self._last_partial_at < cfg.partial_interval_sec:
-            return
-
-        self._partial_running = True
-        self._last_partial_at = now
         try:
             text = await asyncio.to_thread(
                 self.engine._backend_impl.feed,
                 list(samples),
                 cfg.sample_rate,
             )
-            text = text.strip()
-            if text and text != self._last_partial_text:
-                self._last_partial_text = text
-                self._partial_count += 1
-                LOG.info("[asr] partial: %s", text)
-                await self.on_partial(text)
-        finally:
-            self._partial_running = False
+        except Exception as exc:
+            LOG.error("[asr] streaming feed error: %s", exc)
+            return
+
+        if not cfg.partial_enabled:
+            return
+        text = text.strip()
+        if text and text != self._last_partial_text:
+            self._last_partial_text = text
+            self._partial_count += 1
+            LOG.info("[asr] partial: %s", text)
+            await self.on_partial(text)
 
     async def _maybe_partial_offline(self) -> None:
         cfg = self.engine.cfg

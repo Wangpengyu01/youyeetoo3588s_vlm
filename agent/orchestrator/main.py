@@ -275,7 +275,16 @@ class Orchestrator:
                 continue
             if etype == "audio_segment":
                 duration = float(event.get("duration_sec", 0.0))
+                if self._speaking:
+                    LOG.info("[barge-in] speech segment %.2fs detected during TTS, interrupting playback immediately", duration)
+                    await self._interrupt_tts()
+                    await self._turn_queue.put(event)
+                    continue
                 if self._turn_busy and not self._speaking and not self._tts_abort:
+                    if duration >= 0.8:
+                        LOG.info("[vad] busy turn, but segment is valid user speech (%.2fs), queuing", duration)
+                        await self._turn_queue.put(event)
+                        continue
                     LOG.info("[vad] busy ASR/LLM, drop %.2fs segment", duration)
                     continue
                 if (
@@ -396,10 +405,11 @@ class Orchestrator:
         self.set_state(AgentState.LLM)
 
         u_clean = user_prompt.strip()
-        if re.search(r"^(重置|重新开始|清空历史|刷新|重新聊|别说了|闭嘴|算了|打住|停|停止|停下)[了]?$", u_clean):
+        STOP_PAT = re.compile(r"(停|暂停|别说了|闭嘴|算了|打住|停止|停下|别讲|不要说|闭上嘴|别出声|安静|停一下)")
+        if STOP_PAT.search(u_clean):
             self._chat_turns.clear()
             await asyncio.to_thread(llm_clear_history, self.socket_path)
-            LOG.info("[llm] user requested session reset / stop")
+            LOG.info("[llm] user requested session reset / stop: %s", u_clean)
             await self._speak_turn("好的。")
             return
 
