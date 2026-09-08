@@ -28,6 +28,51 @@ class FakeTtsQueue:
 
 
 class StreamingTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_llm_failure_speaks_a_short_recovery_prompt(self) -> None:
+        orch = object.__new__(Orchestrator)
+        orch._chat_turns = []
+        orch.history_idle_clear_sec = 0
+        orch.history_max_turns = 1
+        orch.system_prompt = ""
+        orch.socket_path = "/ignored"
+        orch.max_new_tokens = 64
+        orch._tts_abort = False
+        orch._active_turn_id = 8
+        orch._active_tts_text = ""
+        orch._last_spoken_turn = ""
+        orch._last_tts_end_at = 0.0
+        orch._listen_cooldown_until = 0.0
+        orch.listen_cooldown_sec = 0.2
+        orch._paused_relay_text = None
+        orch._current_splitter = None
+        orch._speaking = False
+        orch.state = AgentState.LLM
+        events: list[dict] = []
+        recovery: list[tuple[str, int]] = []
+
+        async def emit(event: dict) -> None:
+            events.append(event)
+
+        async def prepare() -> None:
+            return None
+
+        async def speak(text: str, *, generation: int) -> None:
+            recovery.append((text, generation))
+
+        orch.emit = emit  # type: ignore[method-assign]
+        orch._prepare_llm_call = prepare  # type: ignore[method-assign]
+        orch._speak_turn = speak  # type: ignore[method-assign]
+        orch.set_state = lambda state: None  # type: ignore[method-assign]
+
+        def failing_stream(prompt: str, on_token, **kwargs):
+            raise ConnectionResetError("llm socket reset")
+
+        with patch("orchestrator.main.llm_chat_stream", failing_stream):
+            await orch._run_llm("请解释一个复杂问题", generation=8, vad_end_at=time.monotonic())
+
+        self.assertEqual(recovery, [("刚才出了点问题，请再说一遍。", 8)])
+        self.assertIn({"type": "error", "code": "llm_failed"}, events)
+
     async def test_streaming_turn_hides_thinking_and_enqueues_a_natural_clause(self) -> None:
         orch = object.__new__(Orchestrator)
         orch._chat_turns = []

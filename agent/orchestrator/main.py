@@ -665,8 +665,13 @@ class Orchestrator:
             if self._tts_abort:
                 LOG.info("[barge-in] skipped post-abort cooldown")
         except Exception as exc:
-            LOG.error("[llm] request failed: %s", exc)
+            LOG.exception("[llm] request failed (%s): %r", type(exc).__name__, exc)
             await self.emit({"type": "error", "code": "llm_failed"})
+            if not self._tts_abort and generation == self._active_turn_id:
+                try:
+                    await self._speak_turn("刚才出了点问题，请再说一遍。", generation=generation)
+                except Exception:
+                    LOG.exception("[tts] recovery prompt failed")
         finally:
             self._current_splitter = None
 

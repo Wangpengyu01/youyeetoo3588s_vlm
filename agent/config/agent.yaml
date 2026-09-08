@@ -33,8 +33,9 @@ vad:
   arecord_period_size: 320
   arecord_buffer_size: 2560
   mic_capture_gain: 8
-  # false keeps barge-in active. Set true only when diagnosing acoustic feedback.
-  mute_mic_during_tts: false
+  # This board has no AEC: keeping capture live during playback feeds the speaker
+  # back into ASR and can interrupt a response as if it were user speech.
+  mute_mic_during_tts: true
 
 barge_in:
   enabled: true
