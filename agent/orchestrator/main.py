@@ -436,16 +436,25 @@ class Orchestrator:
     async def _enqueue_speak(
         self,
         text: str,
-        tts_state: dict[str, int | bool],
+        tts_state: dict[str, Any],
         *,
         generation: int,
-    ) -> bool:
+    ) -> bool | None:
         if self._tts_abort or generation != self._active_turn_id:
             return False
         speak = sanitize_tts_text(text)
         if not is_speakable(speak):
             return False
+        spoken_key = normalize_spoken_text(speak)
+        spoken_keys: set[str] = tts_state.setdefault("spoken_keys", set())
+        if spoken_key and spoken_key in spoken_keys:
+            LOG.warning("[llm] suppressed repeated streamed clause: %s", speak[:60])
+            return None
+        if spoken_key:
+            spoken_keys.add(spoken_key)
         tts_state["n"] = int(tts_state["n"]) + 1
+        spoken_texts: list[str] = tts_state.setdefault("spoken_texts", [])
+        spoken_texts.append(speak)
         if self.state != AgentState.TTS:
             self.set_state(AgentState.TTS)
         self._speaking = True
@@ -456,7 +465,7 @@ class Orchestrator:
 
     async def _speak_extracted(self, full: str, *, canned: bool = False, generation: int) -> None:
         """Enqueue every complete sentence in full — no char/sentence cap."""
-        tts_state: dict[str, int | bool] = {"n": 0, "canned": canned}
+        tts_state: dict[str, Any] = {"n": 0, "canned": canned, "spoken_keys": set(), "spoken_texts": []}
         sents = extract_speak_sentences(full, max_cjk=99999)
         if not sents:
             return
@@ -464,7 +473,7 @@ class Orchestrator:
         self._active_tts_text = full
         self._last_spoken_turn = full
         for sent in sents:
-            if not await self._enqueue_speak(sent, tts_state, generation=generation):
+            if (await self._enqueue_speak(sent, tts_state, generation=generation)) is False:
                 break
         if int(tts_state["n"]) <= 0 or self._tts_abort:
             return
@@ -571,7 +580,7 @@ class Orchestrator:
         token_queue: asyncio.Queue[str] = asyncio.Queue()
         splitter = StreamingSentenceSplitter(min_clause_chars=7, max_clause_chars=26)
         self._current_splitter = splitter
-        tts_state: dict[str, int | bool] = {"n": 0, "canned": False}
+        tts_state: dict[str, Any] = {"n": 0, "canned": False, "spoken_keys": set(), "spoken_texts": []}
         first_token_at: float | None = None
 
         def on_token(piece: str) -> None:
@@ -602,8 +611,9 @@ class Orchestrator:
                     if is_echo_reply(user_prompt, chunk):
                         LOG.warning("[llm] suppressed echo chunk: %s", chunk)
                         continue
-                    await self.emit({"type": "llm_token", "text": chunk})
-                    await self._enqueue_speak(chunk, tts_state, generation=generation)
+                    queued = await self._enqueue_speak(chunk, tts_state, generation=generation)
+                    if queued:
+                        await self.emit({"type": "llm_token", "text": chunk})
 
             reply = await llm_task
             if not self._tts_abort and generation == self._active_turn_id:
@@ -611,8 +621,9 @@ class Orchestrator:
                     if is_echo_reply(user_prompt, chunk):
                         LOG.warning("[llm] suppressed echo chunk: %s", chunk)
                         continue
-                    await self.emit({"type": "llm_token", "text": chunk})
-                    await self._enqueue_speak(chunk, tts_state, generation=generation)
+                    queued = await self._enqueue_speak(chunk, tts_state, generation=generation)
+                    if queued:
+                        await self.emit({"type": "llm_token", "text": chunk})
 
             full = clean_llm_reply(user_prompt, reply["text"])
 
@@ -622,6 +633,11 @@ class Orchestrator:
                 full = "我没有听清楚，请再说一遍。"
                 if int(tts_state["n"]) == 0 and not self._tts_abort:
                     await self._speak_extracted(full, canned=True, generation=generation)
+
+            spoken_texts: list[str] = tts_state["spoken_texts"]
+            if spoken_texts:
+                full = "".join(spoken_texts)
+                self._active_tts_text = full
 
             self._last_spoken_turn = full
 

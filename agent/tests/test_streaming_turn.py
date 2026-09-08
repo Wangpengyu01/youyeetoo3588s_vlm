@@ -131,6 +131,55 @@ class StreamingTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", "".join(event["text"] for event in token_events))
         self.assertTrue(any(event["type"] == "latency" for event in events))
 
+    async def test_streaming_turn_suppresses_repeated_model_clauses_and_history(self) -> None:
+        orch = object.__new__(Orchestrator)
+        orch._chat_turns = []
+        orch.history_idle_clear_sec = 0
+        orch.history_max_turns = 1
+        orch.system_prompt = ""
+        orch.socket_path = "/ignored"
+        orch.max_new_tokens = 64
+        orch._tts_abort = False
+        orch._active_turn_id = 9
+        orch._active_tts_text = ""
+        orch._last_spoken_turn = ""
+        orch._last_tts_end_at = 0.0
+        orch._listen_cooldown_until = 0.0
+        orch.listen_cooldown_sec = 0.2
+        orch._paused_relay_text = None
+        orch._current_splitter = None
+        orch._speaking = False
+        orch.state = AgentState.LLM
+        orch.tts_queue = FakeTtsQueue()
+        events: list[dict] = []
+
+        async def emit(event: dict) -> None:
+            events.append(event)
+
+        async def prepare() -> None:
+            return None
+
+        orch.emit = emit  # type: ignore[method-assign]
+        orch._prepare_llm_call = prepare  # type: ignore[method-assign]
+        orch.set_state = lambda state: None  # type: ignore[method-assign]
+
+        repeated = "第一段解释。第二段解释。第一段解释。第二段解释。"
+
+        def fake_stream(prompt: str, on_token, **kwargs):
+            on_token(repeated)
+            return {"text": repeated, "ttft_s": 0.01}
+
+        with patch("orchestrator.main.llm_chat_stream", fake_stream):
+            await orch._run_llm("重复问题", generation=9, vad_end_at=time.monotonic())
+
+        self.assertEqual(
+            orch.tts_queue.enqueued,
+            [("第一段解释。", 9), ("第二段解释。", 9)],
+        )
+        token_events = [event["text"] for event in events if event["type"] == "llm_token"]
+        self.assertEqual(token_events, ["第一段解释。", "第二段解释。"])
+        self.assertEqual(orch._chat_turns, [("重复问题", "第一段解释。第二段解释。")])
+
 
 if __name__ == "__main__":
     unittest.main()
