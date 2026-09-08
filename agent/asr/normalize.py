@@ -12,8 +12,6 @@ _GREETING_NAME = re.compile(r"^(?:你好|电好)?小揽[，,、\s]*", re.IGNOREC
 _GRAVITY_FIX = re.compile(r"引力都")
 _NAME_HOMOPHONE = re.compile(r"^引力(?=[都会]|叫|是)")
 _LEADING_JUNK = re.compile(r"^(?:因不在|在小揽|小揽在不在|在不在|那个|那个啥)")
-# 句首误识别噪声：保留「请告诉我/请说/帮我…」及之后内容
-_INTENT_START = re.compile(r"(请告诉我|请说|请讲|能不能|如何|怎么|帮我|我想)")
 
 
 def normalize_user_text(text: str) -> str:
@@ -49,8 +47,5 @@ def normalize_user_text(text: str) -> str:
     if m_name:
         text = m_name.group(1)
     text = _LEADING_JUNK.sub("", text)
-    m = _INTENT_START.search(text)
-    if m and m.start() > 0 and m.start() <= 8:
-        text = text[m.start() :]
     text = re.sub(r"\s+", "", text)
     return text.strip()
