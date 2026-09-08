@@ -91,3 +91,13 @@ tail -f /userdata/agent/logs/orchestrator.log
 - [ ] `llm_daemon` `{"type":"cancel"}` — RKNN3 session abort  
 - [ ] 播放期 AEC / 更高 VAD 阈值  
 - [ ] InternVL chat template 提升提示词服从率
+
+---
+
+## 2026-09 流畅度更新
+
+- 默认 `vad.mute_mic_during_tts: false`，保证播放期能收 ASR partial 并打断；设为 `true` 时进入半双工诊断模式。
+- 普通打断须满足 `barge_in.min_speech_sec`，而“停”“停止”“别说了”等完整命令可立即生效；“停车”等包含“停”的普通问题不会被误判。
+- TTS 队列按对话轮次隔离，旧轮合成即使晚返回也不会播放到新回答中。
+- 日志和 WebSocket `latency` 事件包含 VAD 结束到 LLM 首 token、TTS 首播的耗时。板端以 `vad_to_first_play_ms <= 1000` 作为首句体验目标。
+- 真正中断 RKNN3 推理仍依赖 Phase G-b 的 daemon abort API；目前实现保证旧轮不再发声或污染新轮。

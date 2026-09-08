@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import sys
 import time
 from pathlib import Path
@@ -22,6 +21,12 @@ from asr.sherpa_streaming_asr import StreamingParaformerConfig
 from asr.vad_stream import VadConfig, VadStream
 from llm.client import llm_chat_stream, llm_clear_history, llm_ping
 from orchestrator.config_loader import load_yaml
+from orchestrator.dialogue_policy import (
+    can_barge_in,
+    is_resume_command,
+    is_stop_command,
+    normalize_spoken_text,
+)
 from orchestrator.events import AgentState
 from tts.sentence_split import (
     StreamingSentenceSplitter,
@@ -29,15 +34,11 @@ from tts.sentence_split import (
     clean_llm_reply,
     extract_speak_sentences,
     is_echo_reply,
-    is_off_topic_reply,
-    is_robotic_reply,
     is_self_echo,
-    is_spurious_name_reply,
     is_speakable,
     persona_reply_for,
     sanitize_tts_text,
     should_skip_llm,
-    STOP_PATTERN,
 )
 from tts.tts_engine import TtsConfig, TtsEngine
 from tts.tts_queue import TtsQueue
@@ -59,7 +60,7 @@ class Orchestrator:
         self.agent_root = agent_root
         self.state = AgentState.IDLE
         self.vad_queue: asyncio.Queue[Any] = asyncio.Queue()
-        self._turn_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._turn_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=2)
         self._asr_session = None
         self._listen_cooldown_until = 0.0
         self._turn_busy = False
@@ -68,9 +69,11 @@ class Orchestrator:
         self._active_tts_text = ""
         self._last_spoken_turn = ""
         self._last_tts_end_at = 0.0
-        self._last_barge_partial = ""
         self._paused_relay_text: str | None = None
         self._current_splitter: Any = None
+        self._next_turn_id = 0
+        self._active_turn_id = 0
+        self._ws_server: asyncio.Server | None = None
 
         vad_cfg = cfg.get("vad") or {}
         asr_cfg = cfg.get("asr") or {}
@@ -107,7 +110,7 @@ class Orchestrator:
         )
         self.listen_cooldown_sec = float(vad_cfg.get("listen_cooldown_sec", 0.5))
         self.listen_cooldown_skip_max_sec = float(vad_cfg.get("listen_cooldown_skip_max_sec", 0.45))
-        self.mute_mic_during_tts = str(vad_cfg.get("mute_mic_during_tts", "true")).lower() not in ("0", "false", "no")
+        self.mute_mic_during_tts = str(vad_cfg.get("mute_mic_during_tts", "false")).lower() not in ("0", "false", "no")
 
         utterance = paths.get("utterance_wav", str(agent_root / "run" / "last_utterance.wav"))
         asr_backend = str(asr_cfg.get("backend", "sense_voice")).strip().lower()
@@ -219,56 +222,52 @@ class Orchestrator:
             return False
 
     def _new_asr_session(self):
-        self._last_barge_partial = ""
+        session: Any = None
+        last_partial = ""
 
         async def on_partial(text: str) -> None:
+            nonlocal last_partial
             LOG.info("[event] asr_partial: %s", text)
             await self.emit({"type": "asr_partial", "text": text})
             if self.barge_in_enabled and self._speaking and text.strip():
-                clean_p = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", text)
-                if len(clean_p) >= 1:
-                    cur_speak = (
-                        (getattr(self, "_active_tts_text", "") or "")
-                        + " "
-                        + (getattr(self.tts_queue, "_current_speaking_chunk", "") or "")
-                        + " "
-                        + (getattr(self, "_last_spoken_turn", "") or "")
-                    ).strip()
-
-                    # 1. 优先检查末尾是否含有打断停词 (停/闭嘴/别说了/等等/不要讲...)
-                    tail_check = clean_p[-6:]
-                    if STOP_PATTERN.search(tail_check) and (not cur_speak or tail_check not in cur_speak):
-                        LOG.info("[barge-in] stop keyword matched in tail ('%s'), interrupting TTS immediately", tail_check)
-                        await self._interrupt_tts()
-                        return
-
-                    # 2. 检查自上一帧 partial 以来新增的尾部字符增量 delta
-                    last_p = getattr(self, "_last_barge_partial", "")
-                    self._last_barge_partial = clean_p
-                    if clean_p.startswith(last_p) and len(clean_p) > len(last_p):
-                        delta = clean_p[len(last_p):]
-                    else:
-                        delta = clean_p[-4:]
-
-                    # 3. 如果新增增量在机器人播报文本中，则是机器人自己的回声
-                    if delta and cur_speak and is_self_echo(cur_speak, delta):
-                        LOG.info("[barge-in] self-acoustic feedback detected ('%s' in '%s'), ignoring", delta, cur_speak[:30])
-                        return
-
-                    # 4. 如果整句都在播报文本中，也是回声
-                    if cur_speak and is_self_echo(cur_speak, clean_p):
-                        LOG.info("[barge-in] self-acoustic feedback detected ('%s' in '%s'), ignoring", clean_p[:15], cur_speak[:30])
-                        return
-
-                    LOG.info("[barge-in] user spoke (delta='%s', text='%s'), interrupting TTS immediately", delta, text)
+                clean_p = normalize_spoken_text(text)
+                if not clean_p:
+                    return
+                cur_speak = (
+                    (self._active_tts_text or "")
+                    + " "
+                    + (getattr(self.tts_queue, "_current_speaking_chunk", "") or "")
+                    + " "
+                    + (self._last_spoken_turn or "")
+                ).strip()
+                if cur_speak and is_self_echo(cur_speak, clean_p):
+                    LOG.info("[barge-in] self-acoustic feedback detected: %s", clean_p[:15])
+                    return
+                if is_stop_command(clean_p):
+                    LOG.info("[barge-in] stop command matched: %s", clean_p)
                     await self._interrupt_tts()
+                    return
+                speech_sec = session.buffer_sec if session is not None else 0.0
+                if not can_barge_in(clean_p, speech_sec, self.barge_in_min_sec):
+                    return
+                if clean_p.startswith(last_partial) and len(clean_p) > len(last_partial):
+                    delta = clean_p[len(last_partial) :]
+                else:
+                    delta = clean_p[-4:]
+                last_partial = clean_p
+                if delta and cur_speak and is_self_echo(cur_speak, delta):
+                    LOG.info("[barge-in] self-acoustic feedback delta ignored: %s", delta)
+                    return
+                LOG.info("[barge-in] user speech after %.2fs, interrupting TTS: %s", speech_sec, text)
+                await self._interrupt_tts()
 
         async def on_final(text: str, meta: dict) -> None:
             LOG.info("[event] asr_final: %s", text or meta.get("status"))
             await self.emit({"type": "asr_final", "text": text, "meta": meta})
 
-        self._asr_session = self.asr_engine.create_session(on_partial, on_final)
-        return self._asr_session
+        session = self.asr_engine.create_session(on_partial, on_final)
+        self._asr_session = session
+        return session
 
     async def _interrupt_tts(self) -> None:
         if not self._speaking:
@@ -303,9 +302,35 @@ class Orchestrator:
         while True:
             event = await self._turn_queue.get()
             try:
+                if event is None:
+                    LOG.info("[turn] worker shutdown")
+                    return
                 await self._process_turn(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOG.exception("[turn] processing failed")
+                self._speaking = False
+                self._tts_abort = False
+                self.set_state(AgentState.LISTEN)
+                await self.emit({"type": "error", "code": "turn_failed"})
             finally:
                 self._turn_queue.task_done()
+
+    async def _enqueue_turn(self, event: dict[str, Any]) -> None:
+        """Keep the newest speech turns instead of answering an obsolete backlog."""
+        event.setdefault("_vad_end_at", time.monotonic())
+        dropped = 0
+        while self._turn_queue.full():
+            stale = self._turn_queue.get_nowait()
+            self._turn_queue.task_done()
+            if stale is None:
+                await self._turn_queue.put(None)
+                return
+            dropped += 1
+        if dropped:
+            LOG.info("[turn] dropped %d stale queued segment(s)", dropped)
+        await self._turn_queue.put(event)
 
     async def handle_events(self) -> None:
         self.set_state(AgentState.LISTEN)
@@ -320,10 +345,14 @@ class Orchestrator:
                 continue
             if self.mute_mic_during_tts and self._speaking:
                 if self._asr_session:
-                    asyncio.create_task(self._asr_session.cancel())
+                    await self._asr_session.cancel()
                     self._asr_session = None
+                LOG.debug("[vad] half-duplex diagnostic mode dropped %s", etype)
                 continue
             if etype == "speech_start":
+                if self._turn_busy and not self._speaking:
+                    LOG.debug("[vad] ignore speech start while ASR/LLM owns recognizer")
+                    continue
                 LOG.info("[event] speech_start")
                 self._new_asr_session()
                 await self._asr_session.start()
@@ -337,14 +366,14 @@ class Orchestrator:
             if etype == "audio_segment":
                 duration = float(event.get("duration_sec", 0.0))
                 if self._speaking:
-                    if duration >= 0.8:
+                    if duration >= self.barge_in_min_sec:
                         LOG.info("[vad] speaking turn, queuing potential user speech (%.2fs)", duration)
-                        await self._turn_queue.put(event)
+                        await self._enqueue_turn(event)
                     continue
                 if self._turn_busy and not self._speaking and not self._tts_abort:
                     if duration >= 0.8:
                         LOG.info("[vad] busy turn, but segment is valid user speech (%.2fs), queuing", duration)
-                        await self._turn_queue.put(event)
+                        await self._enqueue_turn(event)
                         continue
                     LOG.info("[vad] busy ASR/LLM, drop %.2fs segment", duration)
                     continue
@@ -355,12 +384,16 @@ class Orchestrator:
                 ):
                     LOG.info("[vad] post-tts cooldown, skip short %.2fs segment", duration)
                     continue
-                await self._turn_queue.put(event)
+                await self._enqueue_turn(event)
+        await self._turn_queue.put(None)
 
     async def _process_turn(self, event: dict[str, Any]) -> None:
+        self._next_turn_id += 1
+        generation = self._next_turn_id
+        self._active_turn_id = generation
         self._turn_busy = True
         self._tts_abort = False
-        self.tts_queue.mark_utterance_start()
+        self.tts_queue.mark_utterance_start(generation)
         duration = event.get("duration_sec", 0.0)
         LOG.info("[event] audio_segment %.2fs", duration)
         self.set_state(AgentState.ASR)
@@ -386,7 +419,11 @@ class Orchestrator:
                         cur_speak[:30],
                     )
                     return
-                await self._run_llm(text)
+                await self._run_llm(
+                    text,
+                    generation=generation,
+                    vad_end_at=float(event.get("_vad_end_at", time.monotonic())),
+                )
             else:
                 LOG.info("[asr] no text recognized")
         finally:
@@ -396,8 +433,14 @@ class Orchestrator:
             self._turn_busy = False
             self.set_state(AgentState.LISTEN)
 
-    async def _enqueue_speak(self, text: str, tts_state: dict[str, int | bool]) -> bool:
-        if self._tts_abort:
+    async def _enqueue_speak(
+        self,
+        text: str,
+        tts_state: dict[str, int | bool],
+        *,
+        generation: int,
+    ) -> bool:
+        if self._tts_abort or generation != self._active_turn_id:
             return False
         speak = sanitize_tts_text(text)
         if not is_speakable(speak):
@@ -408,10 +451,10 @@ class Orchestrator:
         self._speaking = True
         LOG.info("[event] tts_sentence: %s", speak[:60])
         await self.emit({"type": "tts_sentence", "text": speak})
-        await self.tts_queue.enqueue(speak)
+        await self.tts_queue.enqueue(speak, generation=generation)
         return True
 
-    async def _speak_extracted(self, full: str, *, canned: bool = False) -> None:
+    async def _speak_extracted(self, full: str, *, canned: bool = False, generation: int) -> None:
         """Enqueue every complete sentence in full — no char/sentence cap."""
         tts_state: dict[str, int | bool] = {"n": 0, "canned": canned}
         sents = extract_speak_sentences(full, max_cjk=99999)
@@ -421,14 +464,14 @@ class Orchestrator:
         self._active_tts_text = full
         self._last_spoken_turn = full
         for sent in sents:
-            if not await self._enqueue_speak(sent, tts_state):
+            if not await self._enqueue_speak(sent, tts_state, generation=generation):
                 break
         if int(tts_state["n"]) <= 0 or self._tts_abort:
             return
         self.set_state(AgentState.TTS)
         self._speaking = True
         try:
-            await self.tts_queue.wait_done()
+            await self.tts_queue.wait_done(generation=generation)
         finally:
             self._speaking = False
             self._last_tts_end_at = time.monotonic()
@@ -474,45 +517,36 @@ class Orchestrator:
         self._llm_last_turn_at = time.monotonic()
         LOG.info("[llm] transcript stored (%d/%d turns)", len(self._chat_turns), self.history_max_turns)
 
-    async def _speak_turn(self, text: str) -> None:
-        await self._speak_extracted(text, canned=True)
+    async def _speak_turn(self, text: str, *, generation: int) -> None:
+        await self._speak_extracted(text, canned=True, generation=generation)
 
-    async def _run_llm(self, prompt: str) -> None:
+    async def _run_llm(self, prompt: str, *, generation: int, vad_end_at: float) -> None:
         user_prompt = prompt
         self.set_state(AgentState.LLM)
 
         u_clean = user_prompt.strip()
+        normalized = normalize_spoken_text(u_clean)
 
-        # 1. 检查是否为“继续 / 接着说 / 然后呢 / 往下说 / 你说 / 说”等接力指令
-        RESUME_PAT = re.compile(
-            r"^(?:[请那你行好可以接着经已就再]+)?\s*(?:你)?\s*(?:继续|接着说|然后呢|往下说|接着讲|继续讲|继续说|还有呢|你接着说|你继续|接力|你说|你说吧|说吧|你讲|讲吧|说|讲|说下去|接下去说|接力说|继续接力|往下讲|接下来说)[吧呀啊呢了哦嘛]*$"
-        )
-        is_resume = bool(RESUME_PAT.search(u_clean)) or (
-            len(u_clean) <= 6
-            and bool(re.search(r"(继续|接着说|然后呢|往下说|接着讲|继续讲|继续说|还有呢|接力|你说|说吧|你讲|讲吧|说下去)", u_clean))
-        )
-        if is_resume:
+        if is_resume_command(normalized):
             if getattr(self, "_paused_relay_text", None):
                 relay = self._paused_relay_text
                 self._paused_relay_text = None
                 LOG.info("[relay] resuming playback from paused sentences (%d chars): %s", len(relay), relay[:60])
-                await self._speak_turn(relay)
+                await self._speak_turn(relay, generation=generation)
                 return
             elif not self._chat_turns:
-                await self._speak_turn("在呢，请问有什么想让我讲的吗？")
+                await self._speak_turn("在呢，请问有什么想让我讲的吗？", generation=generation)
                 return
 
-        # 2. 检查是否为“停 / 暂停 / 别说了 / 闭嘴 / 打住”等停止指令
-        STOP_PAT = re.compile(r"(停|暂停|别说了|闭嘴|算了|打住|停止|停下|别讲|不要说|闭上嘴|别出声|安静|停一下|等等|等一下)")
-        if STOP_PAT.search(u_clean):
-            LOG.info("[llm] user requested stop: %s (saved relay: %s)", u_clean, bool(getattr(self, "_paused_relay_text", None)))
-            await self._speak_turn("好的。")
+        if is_stop_command(normalized):
+            self._paused_relay_text = None
+            LOG.info("[llm] user requested stop: %s", u_clean)
+            await self._speak_turn("好的。", generation=generation)
             return
 
-        # 3. 若为新提问，清空旧的接力缓存
         self._paused_relay_text = None
 
-        if len(u_clean) <= 1 or re.search(r"^[啊嗯呃哦用呀吧呵哈嘿]+$", u_clean):
+        if len(normalized) <= 1 or (normalized and set(normalized) <= set("啊嗯呃哦呀吧呵哈嘿")):
             LOG.info("[llm] ignored single char or filler noise: %s", u_clean)
             self.set_state(AgentState.LISTEN)
             return
@@ -520,7 +554,7 @@ class Orchestrator:
         if should_skip_llm(user_prompt):
             speak = canned_reply_for(user_prompt) or persona_reply_for(user_prompt)
             LOG.info("[llm] fast-path (skip LLM): %s", speak[:48])
-            await self._speak_turn(speak)
+            await self._speak_turn(speak, generation=generation)
             return
 
         await self._prepare_llm_call()
@@ -532,74 +566,74 @@ class Orchestrator:
             len(prompt),
             user_prompt[:48],
         )
-        buffer = {"text": ""}
         self._active_tts_text = ""
         loop = asyncio.get_running_loop()
+        token_queue: asyncio.Queue[str] = asyncio.Queue()
         splitter = StreamingSentenceSplitter(min_clause_chars=7, max_clause_chars=26)
         self._current_splitter = splitter
         tts_state: dict[str, int | bool] = {"n": 0, "canned": False}
+        first_token_at: float | None = None
 
         def on_token(piece: str) -> None:
-            if self._tts_abort:
-                return
-            buffer["text"] += piece
-            self._active_tts_text += piece
-            asyncio.run_coroutine_threadsafe(
-                self.emit({"type": "llm_token", "text": piece}),
-                loop,
-            )
-            chunks = splitter.feed(piece)
-            for ch in chunks:
-                if self._tts_abort:
-                    break
-                if is_echo_reply(user_prompt, ch):
-                    LOG.warning("[llm] suppressed echo chunk: %s", ch)
-                    continue
-                asyncio.run_coroutine_threadsafe(
-                    self._enqueue_speak(ch, tts_state),
-                    loop,
-                )
+            loop.call_soon_threadsafe(token_queue.put_nowait, piece)
 
         try:
-            reply = await asyncio.to_thread(
-                llm_chat_stream,
-                prompt,
-                on_token,
-                sock_path=self.socket_path,
-                max_new_tokens=self.max_new_tokens,
+            llm_task = asyncio.create_task(
+                asyncio.to_thread(
+                    llm_chat_stream,
+                    prompt,
+                    on_token,
+                    sock_path=self.socket_path,
+                    max_new_tokens=self.max_new_tokens,
+                )
             )
-            rem = splitter.finish()
-            for ch in rem:
-                if self._tts_abort:
-                    break
-                if is_echo_reply(user_prompt, ch):
-                    LOG.warning("[llm] suppressed echo chunk: %s", ch)
+
+            while not llm_task.done() or not token_queue.empty():
+                try:
+                    piece = await asyncio.wait_for(token_queue.get(), timeout=0.04)
+                except TimeoutError:
                     continue
-                await self._enqueue_speak(ch, tts_state)
+                if self._tts_abort or generation != self._active_turn_id:
+                    continue
+                if first_token_at is None:
+                    first_token_at = time.monotonic()
+                self._active_tts_text += piece
+                for chunk in splitter.feed(piece):
+                    if is_echo_reply(user_prompt, chunk):
+                        LOG.warning("[llm] suppressed echo chunk: %s", chunk)
+                        continue
+                    await self.emit({"type": "llm_token", "text": chunk})
+                    await self._enqueue_speak(chunk, tts_state, generation=generation)
+
+            reply = await llm_task
+            if not self._tts_abort and generation == self._active_turn_id:
+                for chunk in splitter.finish():
+                    if is_echo_reply(user_prompt, chunk):
+                        LOG.warning("[llm] suppressed echo chunk: %s", chunk)
+                        continue
+                    await self.emit({"type": "llm_token", "text": chunk})
+                    await self._enqueue_speak(chunk, tts_state, generation=generation)
 
             full = clean_llm_reply(user_prompt, reply["text"])
 
             if is_echo_reply(user_prompt, full):
                 LOG.warning("[llm] detected echo reply ('%s' -> '%s'), wiping history", user_prompt, full)
                 self._chat_turns.clear()
-                if "首都" in user_prompt:
-                    full = "中国的首都是北京。"
-                else:
-                    full = "在呢，请问有什么我可以帮您的吗？"
+                full = "我没有听清楚，请再说一遍。"
                 if int(tts_state["n"]) == 0 and not self._tts_abort:
-                    await self._speak_extracted(full, canned=True)
+                    await self._speak_extracted(full, canned=True, generation=generation)
 
             self._last_spoken_turn = full
 
             if int(tts_state["n"]) == 0 and not self._tts_abort:
                 speak = persona_reply_for(user_prompt)
                 LOG.info("[llm] persona fallback: %s", speak[:48])
-                await self._speak_extracted(speak, canned=True)
+                await self._speak_extracted(speak, canned=True, generation=generation)
                 full = speak
                 self._last_spoken_turn = full
             elif not self._tts_abort:
                 try:
-                    await self.tts_queue.wait_done()
+                    await self.tts_queue.wait_done(generation=generation)
                 finally:
                     self._speaking = False
                     self._last_tts_end_at = time.monotonic()
@@ -609,6 +643,19 @@ class Orchestrator:
                 if full.strip():
                     self._record_chat_turn(user_prompt, full)
 
+            first_play_at = self.tts_queue.first_play_at
+            if first_play_at is not None:
+                latency = {
+                    "type": "latency",
+                    "generation": generation,
+                    "vad_to_first_token_ms": round(
+                        1000 * ((first_token_at or first_play_at) - vad_end_at), 1
+                    ),
+                    "vad_to_first_play_ms": round(1000 * (first_play_at - vad_end_at), 1),
+                }
+                await self.emit(latency)
+                LOG.info("[latency] turn=%d first_token=%sms first_play=%sms", generation, latency["vad_to_first_token_ms"], latency["vad_to_first_play_ms"])
+
             LOG.info(
                 "[llm] reply (%d chars, ttft=%.3fs): %s",
                 len(full),
@@ -617,8 +664,9 @@ class Orchestrator:
             )
             if self._tts_abort:
                 LOG.info("[barge-in] skipped post-abort cooldown")
-        except OSError as exc:
+        except Exception as exc:
             LOG.error("[llm] request failed: %s", exc)
+            await self.emit({"type": "error", "code": "llm_failed"})
         finally:
             self._current_splitter = None
 
@@ -629,19 +677,26 @@ class Orchestrator:
         self.set_state(AgentState.IDLE)
         self.ping_llm_daemon()
         await self.tts_queue.start()
-        if self.api_enabled:
-            try:
-                await run_ws_server(self.event_bus, self.api_host, self.api_port)
-            except OSError as exc:
-                LOG.warning(
-                    "[api] WebSocket bind failed (%s) — voice pipeline continues without WS",
-                    exc,
-                )
-        await asyncio.gather(
-            self.run_vad_loop(inject_wav),
-            self.handle_events(),
-            self._turn_worker(),
-        )
+        try:
+            if self.api_enabled:
+                try:
+                    self._ws_server = await run_ws_server(self.event_bus, self.api_host, self.api_port)
+                except OSError as exc:
+                    LOG.warning(
+                        "[api] WebSocket bind failed (%s) — voice pipeline continues without WS",
+                        exc,
+                    )
+            await asyncio.gather(
+                self.run_vad_loop(inject_wav),
+                self.handle_events(),
+                self._turn_worker(),
+            )
+        finally:
+            if self._ws_server is not None:
+                self._ws_server.close()
+                await self._ws_server.wait_closed()
+                self._ws_server = None
+            await self.tts_queue.stop()
 
 
 def main() -> None:
@@ -667,10 +722,10 @@ def main() -> None:
     if args.no_partial or args.inject_wav:
         orch.asr_engine.cfg.partial_enabled = False
     if args.no_tts:
-        async def _noop_enqueue(text: str) -> None:
+        async def _noop_enqueue(text: str, *, generation: int | None = None) -> None:
             LOG.info("[tts] skipped: %s", text[:60])
 
-        async def _noop_wait() -> None:
+        async def _noop_wait(generation: int | None = None) -> None:
             return None
 
         orch.tts_queue.enqueue = _noop_enqueue  # type: ignore[method-assign]

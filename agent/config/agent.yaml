@@ -33,7 +33,8 @@ vad:
   arecord_period_size: 320
   arecord_buffer_size: 2560
   mic_capture_gain: 8
-  mute_mic_during_tts: true
+  # false keeps barge-in active. Set true only when diagnosing acoustic feedback.
+  mute_mic_during_tts: false
 
 barge_in:
   enabled: true
