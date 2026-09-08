@@ -187,7 +187,14 @@ class Orchestrator:
         if new != self.state:
             LOG.info("[state] %s -> %s", self.state.value, new.value)
             self.state = new
-            asyncio.create_task(self.emit({"type": "state", "value": new.value}))
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.emit({"type": "state", "value": new.value}))
+            except RuntimeError:
+                if self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self.emit({"type": "state", "value": new.value}), self._loop
+                    )
 
     def ping_llm_daemon(self) -> bool:
         if not Path(self.socket_path).exists():
@@ -318,6 +325,9 @@ class Orchestrator:
         if not is_speakable(speak):
             return False
         tts_state["n"] = int(tts_state["n"]) + 1
+        if self.state != AgentState.TTS:
+            self.set_state(AgentState.TTS)
+        self._speaking = True
         LOG.info("[event] tts_sentence: %s", speak[:60])
         await self.emit({"type": "tts_sentence", "text": speak})
         await self.tts_queue.enqueue(speak)
@@ -435,9 +445,6 @@ class Orchestrator:
             for ch in chunks:
                 if self._tts_abort:
                     break
-                if int(tts_state["n"]) == 0:
-                    self.set_state(AgentState.TTS)
-                    self._speaking = True
                 asyncio.run_coroutine_threadsafe(
                     self._enqueue_speak(ch, tts_state),
                     loop,
@@ -455,9 +462,6 @@ class Orchestrator:
             for ch in rem:
                 if self._tts_abort:
                     break
-                if int(tts_state["n"]) == 0:
-                    self.set_state(AgentState.TTS)
-                    self._speaking = True
                 await self._enqueue_speak(ch, tts_state)
 
             full = clean_llm_reply(user_prompt, reply["text"])
@@ -499,6 +503,7 @@ class Orchestrator:
             LOG.error("[llm] request failed: %s", exc)
 
     async def run(self, inject_wav: str | None = None) -> None:
+        self._loop = asyncio.get_running_loop()
         (self.agent_root / "run").mkdir(parents=True, exist_ok=True)
         (self.agent_root / "logs").mkdir(parents=True, exist_ok=True)
         self.set_state(AgentState.IDLE)
