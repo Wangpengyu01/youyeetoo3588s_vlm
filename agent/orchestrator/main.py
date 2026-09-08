@@ -64,6 +64,11 @@ class Orchestrator:
         self._turn_busy = False
         self._speaking = False
         self._tts_abort = False
+        self._active_tts_text = ""
+        self._last_spoken_turn = ""
+        self._last_tts_end_at = 0.0
+        self._paused_relay_text: str | None = None
+        self._current_splitter: Any = None
 
         vad_cfg = cfg.get("vad") or {}
         asr_cfg = cfg.get("asr") or {}
@@ -217,9 +222,15 @@ class Orchestrator:
             if self.barge_in_enabled and self._speaking and text.strip():
                 clean_p = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", text)
                 if len(clean_p) >= 1:
-                    cur_speak = getattr(self.tts_queue, "_current_speaking_chunk", "") or getattr(self, "_active_tts_text", "")
+                    cur_speak = (
+                        (getattr(self, "_active_tts_text", "") or "")
+                        + " "
+                        + (getattr(self.tts_queue, "_current_speaking_chunk", "") or "")
+                        + " "
+                        + (getattr(self, "_last_spoken_turn", "") or "")
+                    ).strip()
                     if cur_speak and is_self_echo(cur_speak, clean_p):
-                        LOG.info("[barge-in] self-acoustic feedback detected ('%s' in '%s'), ignoring", clean_p, cur_speak[:24])
+                        LOG.info("[barge-in] self-acoustic feedback detected ('%s' in '%s'), ignoring", clean_p, cur_speak[:30])
                         return
                     LOG.info("[barge-in] user spoke (%s), interrupting TTS immediately", text)
                     await self._interrupt_tts()
@@ -236,6 +247,8 @@ class Orchestrator:
             return
         LOG.info("[barge-in] interrupt TTS playback immediately")
         self._tts_abort = True
+        self._speaking = False
+        self._last_tts_end_at = time.monotonic()
         self._listen_cooldown_until = 0.0
         pending = await self.tts_queue.interrupt()
         relay_parts = list(pending)
@@ -327,9 +340,18 @@ class Orchestrator:
             text = normalize_user_text((result.get("text") or "").strip())
             if text:
                 LOG.info("[asr] normalized: %s", text)
-                last_reply = getattr(self, "_last_spoken_turn", "")
-                if last_reply and is_self_echo(last_reply, text):
-                    LOG.warning("[asr] detected acoustic echo of last assistant reply ('%s'), dropping loop", text)
+                recent_tts = self._speaking or (time.monotonic() - getattr(self, "_last_tts_end_at", 0.0) < 2.0)
+                cur_speak = (
+                    (getattr(self, "_active_tts_text", "") or "")
+                    + " "
+                    + (getattr(self, "_last_spoken_turn", "") or "")
+                ).strip()
+                if recent_tts and cur_speak and is_self_echo(cur_speak, text):
+                    LOG.warning(
+                        "[asr] detected acoustic echo of assistant speech ('%s' in '%s'), dropping loop",
+                        text,
+                        cur_speak[:30],
+                    )
                     return
                 await self._run_llm(text)
             else:
@@ -363,6 +385,8 @@ class Orchestrator:
         if not sents:
             return
         LOG.info("[tts] speak plan: %d sentence(s)", len(sents))
+        self._active_tts_text = full
+        self._last_spoken_turn = full
         for sent in sents:
             if not await self._enqueue_speak(sent, tts_state):
                 break
@@ -374,6 +398,7 @@ class Orchestrator:
             await self.tts_queue.wait_done()
         finally:
             self._speaking = False
+            self._last_tts_end_at = time.monotonic()
         if not self._tts_abort:
             self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
         lat = self.tts_queue.first_play_latency_s
@@ -471,6 +496,7 @@ class Orchestrator:
             user_prompt[:48],
         )
         buffer = {"text": ""}
+        self._active_tts_text = ""
         loop = asyncio.get_running_loop()
         splitter = StreamingSentenceSplitter(min_clause_chars=7, max_clause_chars=26)
         self._current_splitter = splitter
@@ -480,6 +506,7 @@ class Orchestrator:
             if self._tts_abort:
                 return
             buffer["text"] += piece
+            self._active_tts_text += piece
             asyncio.run_coroutine_threadsafe(
                 self.emit({"type": "llm_token", "text": piece}),
                 loop,
@@ -538,6 +565,7 @@ class Orchestrator:
                     await self.tts_queue.wait_done()
                 finally:
                     self._speaking = False
+                    self._last_tts_end_at = time.monotonic()
 
             if not self._tts_abort:
                 self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
