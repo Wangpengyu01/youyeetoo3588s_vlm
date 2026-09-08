@@ -318,9 +318,9 @@ class StreamingSentenceSplitter:
         self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
 
         chunks: list[str] = []
-        # Fast First Chunk: first sentence uses shorter threshold for instant speech
-        curr_min = 5 if not self._first_chunk_emitted else self.min_clause_chars
-        curr_max = 12 if not self._first_chunk_emitted else self.max_clause_chars
+        # Fast First Chunk: first sentence uses ultra-short threshold (4-7 chars) for instant sub-second speech
+        curr_min = 4 if not self._first_chunk_emitted else self.min_clause_chars
+        curr_max = 7 if not self._first_chunk_emitted else self.max_clause_chars
 
         while True:
             # 1. Check for sentence-ending punctuation (。！？!?\n)
@@ -348,7 +348,7 @@ class StreamingSentenceSplitter:
                 clean = sanitize_tts_text(raw_chunk)
                 if is_speakable(clean):
                     if not clean.endswith(("。", "！", "？", "，")):
-                        clean += "。"
+                        clean += "，"
                     chunks.append(clean)
                     self._first_chunk_emitted = True
                     curr_min = self.min_clause_chars
@@ -361,8 +361,8 @@ class StreamingSentenceSplitter:
                 self._buf = self._buf[curr_max:]
                 clean = sanitize_tts_text(raw_chunk)
                 if is_speakable(clean):
-                    if not clean.endswith(("。", "！", "？")):
-                        clean += "。"
+                    if not clean.endswith(("。", "！", "？", "，")):
+                        clean += "，"
                     chunks.append(clean)
                     self._first_chunk_emitted = True
                     curr_min = self.min_clause_chars

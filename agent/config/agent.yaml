@@ -19,17 +19,17 @@ vad:
   sample_rate: 16000
   chunk_ms: 100
   threshold: 0.5
-  min_silence_duration: 0.35
+  min_silence_duration: 0.30
   min_speech_duration: 0.20
   max_speech_duration: 30.0
   min_segment_sec: 0.5
-  speech_preroll_ms: 450
+  speech_preroll_ms: 300
   listen_cooldown_sec: 0.35
   listen_cooldown_skip_max_sec: 0.30
   alsa_device: plughw:0,0
   arecord_period_size: 320
   arecord_buffer_size: 2560
-  mic_capture_gain: 6
+  mic_capture_gain: 5
 
 barge_in:
   enabled: true
