@@ -214,8 +214,8 @@ class Orchestrator:
             await self.emit({"type": "asr_partial", "text": text})
             if self.barge_in_enabled and self._speaking and text.strip():
                 clean_p = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", text)
-                if re.search(r"(停|别|闭嘴|算了|打住|不要|等一下|小揽|重置)", clean_p) or len(clean_p) >= 2:
-                    LOG.info("[barge-in] fast trigger on user speech: %s", text)
+                if re.search(r"(停|别|闭嘴|算了|打住|不要|等一下|小揽|重置|住口|安静)", clean_p):
+                    LOG.info("[barge-in] fast trigger on stop command: %s", text)
                     await self._interrupt_tts()
 
         async def on_final(text: str, meta: dict) -> None:
@@ -278,6 +278,9 @@ class Orchestrator:
                 if self._turn_busy and not self._speaking:
                     LOG.info("[vad] busy ASR/LLM, drop %.2fs segment", duration)
                     continue
+                if self._speaking:
+                    LOG.info("[vad] segment %.2fs during TTS, ignoring speaker echo", duration)
+                    continue
                 if (
                     not self._speaking
                     and time.monotonic() < self._listen_cooldown_until
@@ -285,11 +288,6 @@ class Orchestrator:
                 ):
                     LOG.info("[vad] post-tts cooldown, skip short %.2fs segment", duration)
                     continue
-                if self.barge_in_enabled and self._speaking:
-                    if duration < self.barge_in_min_sec:
-                        LOG.info("[barge-in] segment too short (%.2fs), skip", duration)
-                        continue
-                    await self._interrupt_tts()
                 await self._turn_queue.put(event)
 
     async def _process_turn(self, event: dict[str, Any]) -> None:
