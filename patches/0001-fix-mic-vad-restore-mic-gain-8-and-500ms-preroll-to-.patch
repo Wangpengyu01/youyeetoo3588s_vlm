@@ -1,0 +1,38 @@
+From 6e801246499be26910911fde16332fe4aae19882 Mon Sep 17 00:00:00 2001
+From: Wangpengyu01 <m13937429165_1@163.com>
+Date: Tue, 8 Sep 2026 21:58:37 +0800
+Subject: [PATCH] fix(mic,vad): restore mic gain 8 and 500ms preroll to prevent
+ clipped speech onsets
+
+---
+ agent/config/agent.yaml | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/agent/config/agent.yaml b/agent/config/agent.yaml
+index 4adac0f..92a1eda 100644
+--- a/agent/config/agent.yaml
++++ b/agent/config/agent.yaml
+@@ -20,17 +20,17 @@ vad:
+   sample_rate: 16000
+   chunk_ms: 100
+   threshold: 0.5
+-  min_silence_duration: 0.30
++  min_silence_duration: 0.35
+   min_speech_duration: 0.20
+   max_speech_duration: 30.0
+   min_segment_sec: 0.5
+-  speech_preroll_ms: 300
++  speech_preroll_ms: 500
+   listen_cooldown_sec: 0.35
+   listen_cooldown_skip_max_sec: 0.30
+   alsa_device: plughw:0,0
+   arecord_period_size: 320
+   arecord_buffer_size: 2560
+-  mic_capture_gain: 5
++  mic_capture_gain: 8
+ 
+ barge_in:
+   enabled: true
+-- 
+2.53.0.windows.2
+

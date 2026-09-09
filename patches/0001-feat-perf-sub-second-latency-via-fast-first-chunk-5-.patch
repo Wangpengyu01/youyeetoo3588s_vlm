@@ -1,0 +1,105 @@
+From 3a7725a1ccf55503451ce9fd964236f4ea41918c Mon Sep 17 00:00:00 2001
+From: Wangpengyu01 <m13937429165_1@163.com>
+Date: Tue, 8 Sep 2026 21:34:47 +0800
+Subject: [PATCH] feat(perf): sub-second latency via fast-first-chunk (5-12
+ chars), 4-thread TTS, and 0.35s VAD
+
+---
+ agent/config/agent.yaml     |  6 +++---
+ agent/tts/sentence_split.py | 24 +++++++++++++++++++-----
+ 2 files changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/agent/config/agent.yaml b/agent/config/agent.yaml
+index 336fe4f..83175e8 100644
+--- a/agent/config/agent.yaml
++++ b/agent/config/agent.yaml
+@@ -19,7 +19,7 @@ vad:
+   sample_rate: 16000
+   chunk_ms: 100
+   threshold: 0.5
+-  min_silence_duration: 0.45
++  min_silence_duration: 0.35
+   min_speech_duration: 0.20
+   max_speech_duration: 30.0
+   min_segment_sec: 0.5
+@@ -65,8 +65,8 @@ tts:
+   vocoder: /userdata/voice/vocos-22khz-univ.onnx
+   sherpa_bin: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/bin/sherpa-onnx-offline-tts
+   sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
+-  num_threads: 2
+-  speed: 1.0
++  num_threads: 4
++  speed: 1.05
+   max_chars: 160
+   merge_max_chars: 80
+ 
+diff --git a/agent/tts/sentence_split.py b/agent/tts/sentence_split.py
+index 9fe9a37..3238dc3 100644
+--- a/agent/tts/sentence_split.py
++++ b/agent/tts/sentence_split.py
+@@ -300,6 +300,7 @@ class StreamingSentenceSplitter:
+         self.max_clause_chars = max_clause_chars
+         self._buf = ""
+         self._think_active = False
++        self._first_chunk_emitted = False
+ 
+     def feed(self, piece: str) -> list[str]:
+         self._buf += piece
+@@ -317,6 +318,10 @@ class StreamingSentenceSplitter:
+         self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
+ 
+         chunks: list[str] = []
++        # Fast First Chunk: first sentence uses shorter threshold for instant speech
++        curr_min = 5 if not self._first_chunk_emitted else self.min_clause_chars
++        curr_max = 12 if not self._first_chunk_emitted else self.max_clause_chars
++
+         while True:
+             # 1. Check for sentence-ending punctuation (。！？!?\n)
+             m = re.search(r"[。！？!?\n]+", self._buf)
+@@ -329,11 +334,14 @@ class StreamingSentenceSplitter:
+                     if not clean.endswith(("。", "！", "？")):
+                         clean += "。"
+                     chunks.append(clean)
++                    self._first_chunk_emitted = True
++                    curr_min = self.min_clause_chars
++                    curr_max = self.max_clause_chars
+                 continue
+ 
+             # 2. Check for clause boundaries (，,；;) when buffer has enough characters
+             m_comma = re.search(r"[，,；;]+", self._buf)
+-            if m_comma and m_comma.start() >= self.min_clause_chars:
++            if m_comma and m_comma.start() >= curr_min:
+                 end_pos = m_comma.end()
+                 raw_chunk = self._buf[:end_pos].strip()
+                 self._buf = self._buf[end_pos:]
+@@ -342,17 +350,23 @@ class StreamingSentenceSplitter:
+                     if not clean.endswith(("。", "！", "？", "，")):
+                         clean += "。"
+                     chunks.append(clean)
++                    self._first_chunk_emitted = True
++                    curr_min = self.min_clause_chars
++                    curr_max = self.max_clause_chars
+                 continue
+ 
+-            # 3. Buffer length safety cap
+-            if len(self._buf) >= self.max_clause_chars:
+-                raw_chunk = self._buf[: self.max_clause_chars].strip()
+-                self._buf = self._buf[self.max_clause_chars :]
++            # 3. Buffer length safety cap (forces first chunk at curr_max for instant TTFT speech)
++            if len(self._buf) >= curr_max:
++                raw_chunk = self._buf[:curr_max].strip()
++                self._buf = self._buf[curr_max:]
+                 clean = sanitize_tts_text(raw_chunk)
+                 if is_speakable(clean):
+                     if not clean.endswith(("。", "！", "？")):
+                         clean += "。"
+                     chunks.append(clean)
++                    self._first_chunk_emitted = True
++                    curr_min = self.min_clause_chars
++                    curr_max = self.max_clause_chars
+                 continue
+ 
+             break
+-- 
+2.53.0.windows.2
+

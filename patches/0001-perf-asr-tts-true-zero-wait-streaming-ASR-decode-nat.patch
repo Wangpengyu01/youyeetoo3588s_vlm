@@ -1,0 +1,123 @@
+From c5bcfb9b1992f4c4261bac766e18e2bbcb1ab485 Mon Sep 17 00:00:00 2001
+From: Wangpengyu01 <m13937429165_1@163.com>
+Date: Tue, 8 Sep 2026 21:49:35 +0800
+Subject: [PATCH] perf(asr,tts): true zero-wait streaming ASR decode + natural
+ 8-10 char first chunk with clause pause
+
+---
+ agent/asr/asr_engine.py     | 36 ++++++++++++++++++++++++------------
+ agent/tts/sentence_split.py |  8 ++++----
+ 2 files changed, 28 insertions(+), 16 deletions(-)
+
+diff --git a/agent/asr/asr_engine.py b/agent/asr/asr_engine.py
+index a078859..e6a7035 100644
+--- a/agent/asr/asr_engine.py
++++ b/agent/asr/asr_engine.py
+@@ -73,20 +73,29 @@ class _StreamingParaformerBackend:
+         self.recognizer = recognizer
+         self.sample_rate = sample_rate
+         self._buffer: list[float] = []
++        self._fed_samples: int = 0
+ 
+     def reset(self) -> None:
+         self._buffer.clear()
++        self._fed_samples = 0
+         self.recognizer.reset()
+ 
+     def feed(self, samples: list[float], sample_rate: int) -> str:
+         self._buffer.extend(samples)
++        self._fed_samples += len(samples)
+         if not samples:
+             return ""
+         return self.recognizer.feed(samples, sample_rate).strip()
+ 
+     def finalize(self, samples: list[float], sample_rate: int) -> str:
+         buf = list(samples) if samples else self._buffer
+-        if buf:
++        if self._fed_samples > 0 and self._fed_samples <= len(buf):
++            remaining = buf[self._fed_samples :]
++            if remaining:
++                chunk = max(1, int(sample_rate * 0.2))
++                for i in range(0, len(remaining), chunk):
++                    self.recognizer.feed(remaining[i : i + chunk], sample_rate)
++        elif buf:
+             self.recognizer.reset()
+             chunk = max(1, int(sample_rate * 0.2))
+             for i in range(0, len(buf), chunk):
+@@ -151,11 +160,9 @@ class StreamingAsrSession:
+         if not self._active or not samples:
+             return
+         self._buffer.extend(samples)
+-        if not self.engine.cfg.partial_enabled:
+-            return
+         if self._streaming:
+-            await self._streaming_partial(samples)
+-        else:
++            await self._streaming_feed(samples)
++        elif self.engine.cfg.partial_enabled:
+             asyncio.create_task(self._maybe_partial_offline())
+ 
+     async def cancel(self) -> None:
+@@ -229,9 +236,19 @@ class StreamingAsrSession:
+         await asyncio.to_thread(self.engine._backend_impl.reset)
+         return result
+ 
+-    async def _streaming_partial(self, samples: list[float]) -> None:
++    async def _streaming_feed(self, samples: list[float]) -> None:
+         cfg = self.engine.cfg
+-        if self._partial_running:
++        try:
++            text = await asyncio.to_thread(
++                self.engine._backend_impl.feed,
++                list(samples),
++                cfg.sample_rate,
++            )
++        except Exception as exc:
++            LOG.error("[asr] streaming feed error: %s", exc)
++            return
++
++        if not cfg.partial_enabled or self._partial_running:
+             return
+         if self._partial_count >= cfg.max_partials_per_utterance:
+             return
+@@ -244,11 +261,6 @@ class StreamingAsrSession:
+         self._partial_running = True
+         self._last_partial_at = now
+         try:
+-            text = await asyncio.to_thread(
+-                self.engine._backend_impl.feed,
+-                list(samples),
+-                cfg.sample_rate,
+-            )
+             text = text.strip()
+             if text and text != self._last_partial_text:
+                 self._last_partial_text = text
+diff --git a/agent/tts/sentence_split.py b/agent/tts/sentence_split.py
+index b3902c3..de76164 100644
+--- a/agent/tts/sentence_split.py
++++ b/agent/tts/sentence_split.py
+@@ -79,7 +79,7 @@ def sanitize_tts_text(text: str) -> str:
+     text = re.sub(r"[，]{2,}", "，", text)
+     text = re.sub(r"[，。！？]+([。！？])", r"\1", text)
+     text = re.sub(r"^[，。！？]+", "", text)
+-    text = re.sub(r"[，]+$", "。", text)
++    text = re.sub(r"[，]{2,}", "，", text)
+     return text.strip()
+ 
+ 
+@@ -318,9 +318,9 @@ class StreamingSentenceSplitter:
+         self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
+ 
+         chunks: list[str] = []
+-        # Fast First Chunk: first sentence uses ultra-short threshold (4-7 chars) for instant sub-second speech
+-        curr_min = 4 if not self._first_chunk_emitted else self.min_clause_chars
+-        curr_max = 7 if not self._first_chunk_emitted else self.max_clause_chars
++        # Fast First Chunk: first sentence uses natural 6-10 char clause threshold to preserve 2-char words
++        curr_min = 6 if not self._first_chunk_emitted else self.min_clause_chars
++        curr_max = 10 if not self._first_chunk_emitted else self.max_clause_chars
+ 
+         while True:
+             # 1. Check for sentence-ending punctuation (。！？!?\n)
+-- 
+2.53.0.windows.2
+

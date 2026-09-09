@@ -1,0 +1,106 @@
+From 922d46150602a7c97def14c2b495b363ec6bdec2 Mon Sep 17 00:00:00 2001
+From: Wangpengyu01 <m13937429165_1@163.com>
+Date: Tue, 8 Sep 2026 21:42:03 +0800
+Subject: [PATCH] perf(pipeline): ultra-short 4-7 char first chunk, zero
+ warmup/lead silence, and 40ms paplay buffer
+
+---
+ agent/config/agent.yaml     |  6 +++---
+ agent/tts/sentence_split.py | 12 ++++++------
+ agent/tts/tts_engine.py     | 11 ++++++-----
+ 3 files changed, 15 insertions(+), 14 deletions(-)
+
+diff --git a/agent/config/agent.yaml b/agent/config/agent.yaml
+index 83175e8..2cde988 100644
+--- a/agent/config/agent.yaml
++++ b/agent/config/agent.yaml
+@@ -19,17 +19,17 @@ vad:
+   sample_rate: 16000
+   chunk_ms: 100
+   threshold: 0.5
+-  min_silence_duration: 0.35
++  min_silence_duration: 0.30
+   min_speech_duration: 0.20
+   max_speech_duration: 30.0
+   min_segment_sec: 0.5
+-  speech_preroll_ms: 450
++  speech_preroll_ms: 300
+   listen_cooldown_sec: 0.35
+   listen_cooldown_skip_max_sec: 0.30
+   alsa_device: plughw:0,0
+   arecord_period_size: 320
+   arecord_buffer_size: 2560
+-  mic_capture_gain: 6
++  mic_capture_gain: 5
+ 
+ barge_in:
+   enabled: true
+diff --git a/agent/tts/sentence_split.py b/agent/tts/sentence_split.py
+index 3238dc3..b3902c3 100644
+--- a/agent/tts/sentence_split.py
++++ b/agent/tts/sentence_split.py
+@@ -318,9 +318,9 @@ class StreamingSentenceSplitter:
+         self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
+ 
+         chunks: list[str] = []
+-        # Fast First Chunk: first sentence uses shorter threshold for instant speech
+-        curr_min = 5 if not self._first_chunk_emitted else self.min_clause_chars
+-        curr_max = 12 if not self._first_chunk_emitted else self.max_clause_chars
++        # Fast First Chunk: first sentence uses ultra-short threshold (4-7 chars) for instant sub-second speech
++        curr_min = 4 if not self._first_chunk_emitted else self.min_clause_chars
++        curr_max = 7 if not self._first_chunk_emitted else self.max_clause_chars
+ 
+         while True:
+             # 1. Check for sentence-ending punctuation (。！？!?\n)
+@@ -348,7 +348,7 @@ class StreamingSentenceSplitter:
+                 clean = sanitize_tts_text(raw_chunk)
+                 if is_speakable(clean):
+                     if not clean.endswith(("。", "！", "？", "，")):
+-                        clean += "。"
++                        clean += "，"
+                     chunks.append(clean)
+                     self._first_chunk_emitted = True
+                     curr_min = self.min_clause_chars
+@@ -361,8 +361,8 @@ class StreamingSentenceSplitter:
+                 self._buf = self._buf[curr_max:]
+                 clean = sanitize_tts_text(raw_chunk)
+                 if is_speakable(clean):
+-                    if not clean.endswith(("。", "！", "？")):
+-                        clean += "。"
++                    if not clean.endswith(("。", "！", "？", "，")):
++                        clean += "，"
+                     chunks.append(clean)
+                     self._first_chunk_emitted = True
+                     curr_min = self.min_clause_chars
+diff --git a/agent/tts/tts_engine.py b/agent/tts/tts_engine.py
+index 862e4b8..75bebb4 100644
+--- a/agent/tts/tts_engine.py
++++ b/agent/tts/tts_engine.py
+@@ -125,7 +125,8 @@ class TtsEngine:
+         play_script = VOICE_SCRIPTS / "play_wav.sh"
+         env = os.environ.copy()
+         env["PLAYBACK_AGENT_TTS"] = "1"
+-        env.setdefault("PLAYBACK_BUFFER_US", "160000")
++        env["PLAYBACK_PULSE_LATENCY_MS"] = "40"
++        env.setdefault("PLAYBACK_BUFFER_US", "40000")
+         if continuation:
+             env["PLAYBACK_CONTINUATION"] = "1"
+             env["PLAYBACK_WARMUP_SEC"] = "0"
+@@ -134,10 +135,10 @@ class TtsEngine:
+             env["PLAYBACK_TRIM_MS"] = "0"
+             env["PLAYBACK_FADE_OUT_MS"] = "0"
+         else:
+-            env["PLAYBACK_WARMUP_SEC"] = env.get("PLAYBACK_WARMUP_SEC", "0.08")
+-            env["PLAYBACK_LEAD_MS"] = env.get("PLAYBACK_LEAD_MS", "80")
+-            env["PLAYBACK_FADE_MS"] = env.get("PLAYBACK_FADE_MS", "12")
+-            env["PLAYBACK_FADE_OUT_MS"] = env.get("PLAYBACK_FADE_OUT_MS", "20")
++            env["PLAYBACK_WARMUP_SEC"] = "0"
++            env["PLAYBACK_LEAD_MS"] = "0"
++            env["PLAYBACK_FADE_MS"] = "4"
++            env["PLAYBACK_FADE_OUT_MS"] = "10"
+         if not last_in_utterance:
+             env["VOICE_RESTORE_MIC"] = "0"
+         if utterance_gain is not None:
+-- 
+2.53.0.windows.2
+

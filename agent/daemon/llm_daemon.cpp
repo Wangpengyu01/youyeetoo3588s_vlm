@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -40,6 +41,7 @@ static int g_client_fd = -1;
 static std::string g_req_id;
 static struct timeval g_start, g_first_token, g_end;
 static bool g_first_decode = true;
+static bool g_hit_max_new_tokens = false;
 static pthread_mutex_t g_infer_mu = PTHREAD_MUTEX_INITIALIZER;
 static char g_sock_path[108] = DEFAULT_SOCK;
 static volatile sig_atomic_t g_stop = 0;
@@ -183,6 +185,11 @@ static int result_callback(void *userdata, RKLLMResult *result, LLMCallState sta
     send_error(fd, g_req_id.c_str(), "inference error");
     return 0;
   }
+  if (state == RKLLM_RUN_MAX_NEW_TOKEN_REACHED)
+  {
+    g_hit_max_new_tokens = true;
+    return 0;
+  }
   if (state == RKLLM_RUN_NORMAL)
   {
     std::string piece;
@@ -218,12 +225,17 @@ static int init_context_and_model(rknn3_context *p_ctx, const char *model_path, 
   if (ret < 0)
     return ret;
 
+  ret = rknn3_load_model_from_path(ctx, model_path, weight_path);
+  if (ret != RKNN3_SUCCESS)
+  {
+    rknn3_destroy(ctx);
+    return ret;
+  }
+
   memset(&config, 0, sizeof(config));
-  config.model_path = (char *)model_path;
-  config.weight_path = (char *)weight_path;
-  config.core_mask = core_mask;
-  ret = rknn3_load_model(ctx, &config);
-  if (ret < 0)
+  config.run_core_mask = core_mask;
+  ret = rknn3_model_init(ctx, &config);
+  if (ret != RKNN3_SUCCESS)
   {
     rknn3_destroy(ctx);
     return ret;
@@ -236,14 +248,13 @@ static int get_tokenizer_and_embedding(const char *tokenizer_path, VocabInfo *vo
                                        struct embedding_info *embedding_info, const char *embedding_path,
                                        struct stat *emb_st)
 {
-  *tokenizer = new Tokenizer(tokenizer_path);
-  if (!(*tokenizer)->IsLoaded())
+  *tokenizer = new Tokenizer(TOKENIZER_BACKEND_LLAMA, tokenizer_path);
+  if (!(*tokenizer)->GetVocabInfo(vocab_info))
   {
     delete *tokenizer;
     *tokenizer = nullptr;
     return -1;
   }
-  (*tokenizer)->GetVocabInfo(vocab_info);
   memset(embedding_info, 0, sizeof(*embedding_info));
   embedding_info->fd = open(embedding_path, O_RDONLY);
   if (embedding_info->fd == -1)
@@ -368,6 +379,7 @@ static bool handle_chat(int fd, const std::string &line)
   g_client_fd = fd;
   g_req_id = req_id;
   g_first_decode = true;
+  g_hit_max_new_tokens = false;
   gettimeofday(&g_start, NULL);
 
   rknn3_llm_infer_param infer_param = {.keep_history = 1, .max_new_tokens = max_new};
@@ -408,8 +420,9 @@ static bool handle_chat(int fd, const std::string &line)
 
   char done[512];
   snprintf(done, sizeof(done),
-           "{\"type\":\"done\",\"id\":\"%s\",\"usage\":{\"prefill_ms\":%.2f,\"generate_ms\":%.2f,\"tokens\":%d}}",
-           req_id.c_str(), prefill_ms, generate_ms, state.n_decode_tokens);
+           "{\"type\":\"done\",\"id\":\"%s\",\"finish_reason\":\"%s\",\"usage\":{\"prefill_ms\":%.2f,\"generate_ms\":%.2f,\"tokens\":%llu}}",
+           req_id.c_str(), g_hit_max_new_tokens ? "length" : "stop", prefill_ms, generate_ms,
+           static_cast<unsigned long long>(state.n_decode_tokens));
   send_line(fd, done);
   pthread_mutex_unlock(&g_infer_mu);
   return true;

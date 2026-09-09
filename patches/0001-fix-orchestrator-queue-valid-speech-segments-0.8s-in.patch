@@ -1,0 +1,45 @@
+From 84bca887c7a75b5ffcfce67c5025f9064db93e98 Mon Sep 17 00:00:00 2001
+From: Wangpengyu01 <m13937429165_1@163.com>
+Date: Tue, 8 Sep 2026 22:00:59 +0800
+Subject: [PATCH] fix(orchestrator): queue valid speech segments (>=0.8s)
+ instead of dropping during busy turns
+
+---
+ agent/config/agent.yaml    | 3 ++-
+ agent/orchestrator/main.py | 6 +++++-
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/agent/config/agent.yaml b/agent/config/agent.yaml
+index 92a1eda..75936f1 100644
+--- a/agent/config/agent.yaml
++++ b/agent/config/agent.yaml
+@@ -6,7 +6,8 @@ system_prompt: |
+   1. 必须使用纯中文口语回答，严禁输出任何英文字母或英文单词，遇到专业术语请使用中文全称。
+   2. 严格禁止使用任何 Markdown 排版、列表符号或冒号。
+   3. 遇到复杂问题时，请遵循金字塔法则：先用一句话给出核心结论，再简要解释原理，整体控制在两到三句话以内（60字以内），适合简短语音交流。
+-  4. 语句表达必须自然流畅、结构完整，多用逗号和短句形成口语呼吸感，严禁断头断尾。
++  4. 回答的第一句话必须在10到14字左右使用逗号停顿（例如“黑洞，是宇宙中极其密集的天体”），以便极速出声。
++  5. 语句表达必须自然流畅、结构完整，多用逗号和短句形成口语呼吸感，严禁断头断尾。
+ max_new_tokens: 72
+ # Multi-turn: replay last N (user, assistant) pairs in each prompt (OpenAI-style sliding window)
+ history_max_turns: 2
+diff --git a/agent/orchestrator/main.py b/agent/orchestrator/main.py
+index b18e77e..d04dd66 100644
+--- a/agent/orchestrator/main.py
++++ b/agent/orchestrator/main.py
+@@ -276,7 +276,11 @@ class Orchestrator:
+             if etype == "audio_segment":
+                 duration = float(event.get("duration_sec", 0.0))
+                 if self._turn_busy and not self._speaking and not self._tts_abort:
+-                    LOG.info("[vad] busy ASR/LLM, drop %.2fs segment", duration)
++                    if duration >= 0.8:
++                        LOG.info("[vad] busy turn, but segment is valid user speech (%.2fs), queuing", duration)
++                        await self._turn_queue.put(event)
++                        continue
++                    LOG.info("[vad] busy ASR/LLM, drop short %.2fs segment", duration)
+                     continue
+                 if (
+                     not self._speaking
+-- 
+2.53.0.windows.2
+

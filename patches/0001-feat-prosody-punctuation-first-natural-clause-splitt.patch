@@ -1,0 +1,139 @@
+From 9d5361098695d14472e2e334ff3e894a86b81204 Mon Sep 17 00:00:00 2001
+From: Wangpengyu01 <m13937429165_1@163.com>
+Date: Tue, 8 Sep 2026 21:55:47 +0800
+Subject: [PATCH] feat(prosody): punctuation-first natural clause splitting and
+ relaxed 1.0x human speaking rate
+
+---
+ agent/config/agent.yaml     |  3 ++-
+ agent/orchestrator/main.py  |  2 +-
+ agent/tts/sentence_split.py | 43 ++++++++++++++++---------------------
+ 3 files changed, 21 insertions(+), 27 deletions(-)
+
+diff --git a/agent/config/agent.yaml b/agent/config/agent.yaml
+index 2cde988..4adac0f 100644
+--- a/agent/config/agent.yaml
++++ b/agent/config/agent.yaml
+@@ -6,6 +6,7 @@ system_prompt: |
+   1. 必须使用纯中文口语回答，严禁输出任何英文字母或英文单词，遇到专业术语请使用中文全称。
+   2. 严格禁止使用任何 Markdown 排版、列表符号或冒号。
+   3. 遇到复杂问题时，请遵循金字塔法则：先用一句话给出核心结论，再简要解释原理，整体控制在两到三句话以内（60字以内），适合简短语音交流。
++  4. 语句表达必须自然流畅、结构完整，多用逗号和短句形成口语呼吸感，严禁断头断尾。
+ max_new_tokens: 72
+ # Multi-turn: replay last N (user, assistant) pairs in each prompt (OpenAI-style sliding window)
+ history_max_turns: 2
+@@ -66,7 +67,7 @@ tts:
+   sherpa_bin: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/bin/sherpa-onnx-offline-tts
+   sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
+   num_threads: 4
+-  speed: 1.05
++  speed: 1.0
+   max_chars: 160
+   merge_max_chars: 80
+ 
+diff --git a/agent/orchestrator/main.py b/agent/orchestrator/main.py
+index def3949..b18e77e 100644
+--- a/agent/orchestrator/main.py
++++ b/agent/orchestrator/main.py
+@@ -425,7 +425,7 @@ class Orchestrator:
+         )
+         buffer = {"text": ""}
+         loop = asyncio.get_running_loop()
+-        splitter = StreamingSentenceSplitter(min_clause_chars=8, max_clause_chars=22)
++        splitter = StreamingSentenceSplitter(min_clause_chars=8, max_clause_chars=35)
+         tts_state: dict[str, int | bool] = {"n": 0, "canned": False}
+ 
+         def on_token(piece: str) -> None:
+diff --git a/agent/tts/sentence_split.py b/agent/tts/sentence_split.py
+index de76164..aec7fbf 100644
+--- a/agent/tts/sentence_split.py
++++ b/agent/tts/sentence_split.py
+@@ -295,12 +295,11 @@ def flush_remainder(buffer: str) -> list[str]:
+ class StreamingSentenceSplitter:
+     """Consumes LLM tokens in real-time, emitting speakable clauses/sentences as early as possible."""
+ 
+-    def __init__(self, min_clause_chars: int = 8, max_clause_chars: int = 24):
++    def __init__(self, min_clause_chars: int = 8, max_clause_chars: int = 32):
+         self.min_clause_chars = min_clause_chars
+         self.max_clause_chars = max_clause_chars
+         self._buf = ""
+         self._think_active = False
+-        self._first_chunk_emitted = False
+ 
+     def feed(self, piece: str) -> list[str]:
+         self._buf += piece
+@@ -318,15 +317,16 @@ class StreamingSentenceSplitter:
+         self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
+ 
+         chunks: list[str] = []
+-        # Fast First Chunk: first sentence uses natural 6-10 char clause threshold to preserve 2-char words
+-        curr_min = 6 if not self._first_chunk_emitted else self.min_clause_chars
+-        curr_max = 10 if not self._first_chunk_emitted else self.max_clause_chars
+ 
+         while True:
+-            # 1. Check for sentence-ending punctuation (。！？!?\n)
+-            m = re.search(r"[。！？!?\n]+", self._buf)
+-            if m:
+-                end_pos = m.end()
++            # 1. Full sentence punctuation (。！？!?\n) — always split immediately
++            m_sent = re.search(r"[。！？!?\n]+", self._buf)
++            # 2. Clause punctuation (，,；;、) — split if clause has enough content
++            m_comma = re.search(r"[，,；;、]+", self._buf)
++
++            # If sentence end comes first (or exists without preceding comma)
++            if m_sent and (not m_comma or m_sent.start() <= m_comma.start()):
++                end_pos = m_sent.end()
+                 raw_chunk = self._buf[:end_pos].strip()
+                 self._buf = self._buf[end_pos:]
+                 clean = sanitize_tts_text(raw_chunk)
+@@ -334,14 +334,10 @@ class StreamingSentenceSplitter:
+                     if not clean.endswith(("。", "！", "？")):
+                         clean += "。"
+                     chunks.append(clean)
+-                    self._first_chunk_emitted = True
+-                    curr_min = self.min_clause_chars
+-                    curr_max = self.max_clause_chars
+                 continue
+ 
+-            # 2. Check for clause boundaries (，,；;) when buffer has enough characters
+-            m_comma = re.search(r"[，,；;]+", self._buf)
+-            if m_comma and m_comma.start() >= curr_min:
++            # If clause punctuation exists and clause length is sufficient (natural breathing point)
++            if m_comma and m_comma.start() >= self.min_clause_chars:
+                 end_pos = m_comma.end()
+                 raw_chunk = self._buf[:end_pos].strip()
+                 self._buf = self._buf[end_pos:]
+@@ -350,23 +346,20 @@ class StreamingSentenceSplitter:
+                     if not clean.endswith(("。", "！", "？", "，")):
+                         clean += "，"
+                     chunks.append(clean)
+-                    self._first_chunk_emitted = True
+-                    curr_min = self.min_clause_chars
+-                    curr_max = self.max_clause_chars
+                 continue
+ 
+-            # 3. Buffer length safety cap (forces first chunk at curr_max for instant TTFT speech)
+-            if len(self._buf) >= curr_max:
+-                raw_chunk = self._buf[:curr_max].strip()
+-                self._buf = self._buf[curr_max:]
++            # 3. Emergency length cap only (if LLM generates >32 chars without any punctuation)
++            if len(self._buf) >= self.max_clause_chars:
++                # Prefer splitting at natural conjunctions/particles
++                m_conj = re.search(r"(而且|并且|但是|然后|从而|所以|或者|同时)", self._buf[self.min_clause_chars :])
++                cut_pos = (self.min_clause_chars + m_conj.start()) if m_conj else self.max_clause_chars
++                raw_chunk = self._buf[:cut_pos].strip()
++                self._buf = self._buf[cut_pos:]
+                 clean = sanitize_tts_text(raw_chunk)
+                 if is_speakable(clean):
+                     if not clean.endswith(("。", "！", "？", "，")):
+                         clean += "，"
+                     chunks.append(clean)
+-                    self._first_chunk_emitted = True
+-                    curr_min = self.min_clause_chars
+-                    curr_max = self.max_clause_chars
+                 continue
+ 
+             break
+-- 
+2.53.0.windows.2
+

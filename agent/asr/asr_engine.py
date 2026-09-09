@@ -89,13 +89,11 @@ class _StreamingParaformerBackend:
 
     def finalize(self, samples: list[float], sample_rate: int) -> str:
         buf = list(samples) if samples else self._buffer
-        if self._fed_samples > 0 and self._fed_samples <= len(buf):
-            remaining = buf[self._fed_samples :]
-            if remaining:
-                chunk = max(1, int(sample_rate * 0.2))
-                for i in range(0, len(remaining), chunk):
-                    self.recognizer.feed(remaining[i : i + chunk], sample_rate)
-        elif buf:
+        if buf:
+            # Live partials begin only after VAD decides speech has started,
+            # while `buf` also has the VAD pre-roll.  Reuse would therefore
+            # skip the beginning of the utterance (for example “地球”); replay
+            # the complete final segment for the authoritative transcript.
             self.recognizer.reset()
             chunk = max(1, int(sample_rate * 0.2))
             for i in range(0, len(buf), chunk):

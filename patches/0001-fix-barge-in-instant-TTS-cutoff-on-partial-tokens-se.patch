@@ -1,0 +1,207 @@
+From 31f121e254918cf1f9049e2758645d4c0456a114 Mon Sep 17 00:00:00 2001
+From: Wangpengyu01 <m13937429165_1@163.com>
+Date: Tue, 8 Sep 2026 22:23:14 +0800
+Subject: [PATCH] fix(barge-in): instant TTS cutoff on partial tokens, segment
+ barge-in, and expanded stop patterns
+
+---
+ agent/asr/asr_engine.py     | 51 ++++++++++++++++++-------------------
+ agent/config/agent.yaml     | 16 ++++++------
+ agent/orchestrator/main.py  | 14 ++++++++--
+ agent/tts/sentence_split.py |  3 +--
+ 4 files changed, 46 insertions(+), 38 deletions(-)
+
+diff --git a/agent/asr/asr_engine.py b/agent/asr/asr_engine.py
+index a078859..67a7c92 100644
+--- a/agent/asr/asr_engine.py
++++ b/agent/asr/asr_engine.py
+@@ -73,20 +73,29 @@ class _StreamingParaformerBackend:
+         self.recognizer = recognizer
+         self.sample_rate = sample_rate
+         self._buffer: list[float] = []
++        self._fed_samples: int = 0
+ 
+     def reset(self) -> None:
+         self._buffer.clear()
++        self._fed_samples = 0
+         self.recognizer.reset()
+ 
+     def feed(self, samples: list[float], sample_rate: int) -> str:
+         self._buffer.extend(samples)
++        self._fed_samples += len(samples)
+         if not samples:
+             return ""
+         return self.recognizer.feed(samples, sample_rate).strip()
+ 
+     def finalize(self, samples: list[float], sample_rate: int) -> str:
+         buf = list(samples) if samples else self._buffer
+-        if buf:
++        if self._fed_samples > 0 and self._fed_samples <= len(buf):
++            remaining = buf[self._fed_samples :]
++            if remaining:
++                chunk = max(1, int(sample_rate * 0.2))
++                for i in range(0, len(remaining), chunk):
++                    self.recognizer.feed(remaining[i : i + chunk], sample_rate)
++        elif buf:
+             self.recognizer.reset()
+             chunk = max(1, int(sample_rate * 0.2))
+             for i in range(0, len(buf), chunk):
+@@ -151,11 +160,9 @@ class StreamingAsrSession:
+         if not self._active or not samples:
+             return
+         self._buffer.extend(samples)
+-        if not self.engine.cfg.partial_enabled:
+-            return
+         if self._streaming:
+-            await self._streaming_partial(samples)
+-        else:
++            await self._streaming_feed(samples)
++        elif self.engine.cfg.partial_enabled:
+             asyncio.create_task(self._maybe_partial_offline())
+ 
+     async def cancel(self) -> None:
+@@ -229,34 +236,26 @@ class StreamingAsrSession:
+         await asyncio.to_thread(self.engine._backend_impl.reset)
+         return result
+ 
+-    async def _streaming_partial(self, samples: list[float]) -> None:
++    async def _streaming_feed(self, samples: list[float]) -> None:
+         cfg = self.engine.cfg
+-        if self._partial_running:
+-            return
+-        if self._partial_count >= cfg.max_partials_per_utterance:
+-            return
+-        if self.buffer_sec < cfg.partial_min_sec:
+-            return
+-        now = time.monotonic()
+-        if now - self._last_partial_at < cfg.partial_interval_sec:
+-            return
+-
+-        self._partial_running = True
+-        self._last_partial_at = now
+         try:
+             text = await asyncio.to_thread(
+                 self.engine._backend_impl.feed,
+                 list(samples),
+                 cfg.sample_rate,
+             )
+-            text = text.strip()
+-            if text and text != self._last_partial_text:
+-                self._last_partial_text = text
+-                self._partial_count += 1
+-                LOG.info("[asr] partial: %s", text)
+-                await self.on_partial(text)
+-        finally:
+-            self._partial_running = False
++        except Exception as exc:
++            LOG.error("[asr] streaming feed error: %s", exc)
++            return
++
++        if not cfg.partial_enabled:
++            return
++        text = text.strip()
++        if text and text != self._last_partial_text:
++            self._last_partial_text = text
++            self._partial_count += 1
++            LOG.info("[asr] partial: %s", text)
++            await self.on_partial(text)
+ 
+     async def _maybe_partial_offline(self) -> None:
+         cfg = self.engine.cfg
+diff --git a/agent/config/agent.yaml b/agent/config/agent.yaml
+index 2cde988..562425c 100644
+--- a/agent/config/agent.yaml
++++ b/agent/config/agent.yaml
+@@ -19,21 +19,21 @@ vad:
+   sample_rate: 16000
+   chunk_ms: 100
+   threshold: 0.5
+-  min_silence_duration: 0.30
++  min_silence_duration: 0.35
+   min_speech_duration: 0.20
+   max_speech_duration: 30.0
+-  min_segment_sec: 0.5
+-  speech_preroll_ms: 300
++  min_segment_sec: 0.4
++  speech_preroll_ms: 450
+   listen_cooldown_sec: 0.35
+   listen_cooldown_skip_max_sec: 0.30
+   alsa_device: plughw:0,0
+   arecord_period_size: 320
+   arecord_buffer_size: 2560
+-  mic_capture_gain: 5
++  mic_capture_gain: 8
+ 
+ barge_in:
+   enabled: true
+-  min_speech_sec: 0.45
++  min_speech_sec: 0.25
+ 
+ paths:
+   agent_root: /userdata/agent
+@@ -47,10 +47,10 @@ asr:
+   tokens: tokens.txt
+   sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
+   num_threads: 4
+-  partial_interval_sec: 0.8
+-  partial_min_sec: 0.6
++  partial_interval_sec: 0.15
++  partial_min_sec: 0.15
+   partial_enabled: true
+-  max_partials_per_utterance: 5
++  max_partials_per_utterance: 20
+   clip_peak_threshold: 30000
+   clip_limit_ceiling: 0.85
+   # fallback sense_voice:
+diff --git a/agent/orchestrator/main.py b/agent/orchestrator/main.py
+index def3949..4e9f945 100644
+--- a/agent/orchestrator/main.py
++++ b/agent/orchestrator/main.py
+@@ -275,7 +275,16 @@ class Orchestrator:
+                 continue
+             if etype == "audio_segment":
+                 duration = float(event.get("duration_sec", 0.0))
++                if self._speaking:
++                    LOG.info("[barge-in] speech segment %.2fs detected during TTS, interrupting playback immediately", duration)
++                    await self._interrupt_tts()
++                    await self._turn_queue.put(event)
++                    continue
+                 if self._turn_busy and not self._speaking and not self._tts_abort:
++                    if duration >= 0.8:
++                        LOG.info("[vad] busy turn, but segment is valid user speech (%.2fs), queuing", duration)
++                        await self._turn_queue.put(event)
++                        continue
+                     LOG.info("[vad] busy ASR/LLM, drop %.2fs segment", duration)
+                     continue
+                 if (
+@@ -396,10 +405,11 @@ class Orchestrator:
+         self.set_state(AgentState.LLM)
+ 
+         u_clean = user_prompt.strip()
+-        if re.search(r"^(重置|重新开始|清空历史|刷新|重新聊|别说了|闭嘴|算了|打住|停|停止|停下)[了]?$", u_clean):
++        STOP_PAT = re.compile(r"(停|暂停|别说了|闭嘴|算了|打住|停止|停下|别讲|不要说|闭上嘴|别出声|安静|停一下)")
++        if STOP_PAT.search(u_clean):
+             self._chat_turns.clear()
+             await asyncio.to_thread(llm_clear_history, self.socket_path)
+-            LOG.info("[llm] user requested session reset / stop")
++            LOG.info("[llm] user requested session reset / stop: %s", u_clean)
+             await self._speak_turn("好的。")
+             return
+ 
+diff --git a/agent/tts/sentence_split.py b/agent/tts/sentence_split.py
+index b3902c3..e1ffe77 100644
+--- a/agent/tts/sentence_split.py
++++ b/agent/tts/sentence_split.py
+@@ -145,8 +145,7 @@ _CAPABILITY = re.compile(r"做什么|会什么|能干|帮我什么|都会做")
+ _STORY = re.compile(r"故事|哄我|睡前|讲个笑话|讲个故事|讲讲话|讲个话|笑话")
+ _NAME = re.compile(r"叫什么|名字|你是谁|哪位")
+ _RECITE = re.compile(r"背诵|元素周期|周期表|乘法表|九九表")
+-_GREET = re.compile(r"^你好[呀啊]?$|早上好|晚上好")
+-_STOP = re.compile(r"^(不再|停|停止|别说了|不要说了|闭嘴|算了)[了]?$")
++_STOP = re.compile(r"(停|暂停|别说了|不要说了|闭嘴|算了|打住|停止|停下|别讲了|安静|不要讲|停一下)")
+ _INTRO_PREFIX = re.compile(r"^(?:我叫小揽|我是小揽)[，,。\s]*")
+ _NAME_ONLY = re.compile(r"^(?:我叫小揽|我是小揽)[。！？]?$")
+ _SCIENCE_LECTURE = re.compile(r"引力是|基本力|时空弯曲|训练数据|超参数")
+-- 
+2.53.0.windows.2
+

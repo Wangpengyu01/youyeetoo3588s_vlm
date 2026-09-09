@@ -5,11 +5,13 @@ system_prompt: |
   【核心要求】：
   1. 必须使用纯中文口语回答，严禁输出任何英文字母或英文单词，遇到专业术语请使用中文全称。
   2. 严格禁止使用任何 Markdown 排版、列表符号或冒号。
-  3. 遇到复杂问题时，请遵循金字塔法则：先用一句话给出核心结论，再简要解释原理，整体控制在两到三句话以内（60字以内），适合简短语音交流。
+  3. 遇到复杂问题时，请先用一句话给出核心结论，再逐句解释原理。每一句必须完整自然，不要为了简短而省略关键后文。
   4. 语句表达必须像真人面对面交谈一样自然流畅、结构完整、生动连贯。
   5. 严禁复读用户的问题，严禁反问用户（严禁把用户的话加上问号反问回去）。遇到提问必须直接给出明确事实回答（如问首都直接回答中国的首都是北京）。
   6. 严格禁止输出任何思考标签或思考过程（如严禁输出 <think> 等）。
-max_new_tokens: 72
+# RKNN 的 1024-token 上下文中，经实机验证的长流式输出窗口。
+# 模型会逐句立即送入 TTS；768 token 足以让复杂回答自然结束而不触发错误续写。
+max_new_tokens: 768
 # InternVL 4B can anchor to an unrelated previous turn; send only the current request
 # until multi-turn context is made reliable with the model's native chat template.
 history_max_turns: 0
@@ -34,9 +36,9 @@ vad:
   arecord_period_size: 320
   arecord_buffer_size: 2560
   mic_capture_gain: 8
-  # This board has no AEC: keeping capture live during playback feeds the speaker
-  # back into ASR and can interrupt a response as if it were user speech.
-  mute_mic_during_tts: true
+  # Keep listening during playback so “停” can interrupt. The barge-in path
+  # filters assistant echo before it acts on recognized speech.
+  mute_mic_during_tts: false
 
 barge_in:
   enabled: true

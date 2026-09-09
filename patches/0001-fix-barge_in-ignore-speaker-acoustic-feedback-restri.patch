@@ -1,0 +1,50 @@
+From 855d6b3756f29b0799afbcc92bb24d250a74c027 Mon Sep 17 00:00:00 2001
+From: Wangpengyu01 <m13937429165_1@163.com>
+Date: Tue, 8 Sep 2026 21:05:35 +0800
+Subject: [PATCH] fix(barge_in): ignore speaker acoustic feedback, restrict
+ barge-in to explicit stop commands
+
+---
+ agent/orchestrator/main.py | 12 +++++-------
+ 1 file changed, 5 insertions(+), 7 deletions(-)
+
+diff --git a/agent/orchestrator/main.py b/agent/orchestrator/main.py
+index f1ee76c..d68c2eb 100644
+--- a/agent/orchestrator/main.py
++++ b/agent/orchestrator/main.py
+@@ -214,8 +214,8 @@ class Orchestrator:
+             await self.emit({"type": "asr_partial", "text": text})
+             if self.barge_in_enabled and self._speaking and text.strip():
+                 clean_p = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", text)
+-                if re.search(r"(停|别|闭嘴|算了|打住|不要|等一下|小揽|重置)", clean_p) or len(clean_p) >= 2:
+-                    LOG.info("[barge-in] fast trigger on user speech: %s", text)
++                if re.search(r"(停|别|闭嘴|算了|打住|不要|等一下|小揽|重置|住口|安静)", clean_p):
++                    LOG.info("[barge-in] fast trigger on stop command: %s", text)
+                     await self._interrupt_tts()
+ 
+         async def on_final(text: str, meta: dict) -> None:
+@@ -278,6 +278,9 @@ class Orchestrator:
+                 if self._turn_busy and not self._speaking:
+                     LOG.info("[vad] busy ASR/LLM, drop %.2fs segment", duration)
+                     continue
++                if self._speaking:
++                    LOG.info("[vad] segment %.2fs during TTS, ignoring speaker echo", duration)
++                    continue
+                 if (
+                     not self._speaking
+                     and time.monotonic() < self._listen_cooldown_until
+@@ -285,11 +288,6 @@ class Orchestrator:
+                 ):
+                     LOG.info("[vad] post-tts cooldown, skip short %.2fs segment", duration)
+                     continue
+-                if self.barge_in_enabled and self._speaking:
+-                    if duration < self.barge_in_min_sec:
+-                        LOG.info("[barge-in] segment too short (%.2fs), skip", duration)
+-                        continue
+-                    await self._interrupt_tts()
+                 await self._turn_queue.put(event)
+ 
+     async def _process_turn(self, event: dict[str, Any]) -> None:
+-- 
+2.53.0.windows.2
+

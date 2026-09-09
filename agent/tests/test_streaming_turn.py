@@ -29,6 +29,40 @@ class FakeTtsQueue:
 
 
 class StreamingTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_final_stop_command_interrupts_active_tts(self) -> None:
+        """A short stop command may arrive only at ASR finalization, not as a partial."""
+        orch = object.__new__(Orchestrator)
+        orch.barge_in_enabled = True
+        orch._speaking = True
+        orch._active_tts_text = "这是一段正在播放的回答。"
+        orch._last_spoken_turn = ""
+        orch.tts_queue = type("Queue", (), {"_current_speaking_chunk": "正在播放。"})()
+        orch._asr_session = None
+        interrupts: list[str] = []
+
+        class CapturingAsrEngine:
+            def create_session(self, on_partial, on_final):
+                self.on_partial = on_partial
+                self.on_final = on_final
+                return object()
+
+        engine = CapturingAsrEngine()
+        orch.asr_engine = engine
+
+        async def emit(event: dict) -> None:
+            return None
+
+        async def interrupt() -> None:
+            interrupts.append("stop")
+
+        orch.emit = emit  # type: ignore[method-assign]
+        orch._interrupt_tts = interrupt  # type: ignore[method-assign]
+        orch._new_asr_session()
+
+        await engine.on_final("停", {})
+
+        self.assertEqual(interrupts, ["stop"])
+
     def test_zero_history_omits_prior_turns_from_the_llm_prompt(self) -> None:
         orch = object.__new__(Orchestrator)
         orch.system_prompt = "只回答当前问题。"
@@ -153,6 +187,109 @@ class StreamingTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(token_events)
         self.assertNotIn("secret", "".join(event["text"] for event in token_events))
         self.assertTrue(any(event["type"] == "latency" for event in events))
+
+    async def test_streaming_turn_never_reprompts_after_a_length_limited_segment(self) -> None:
+        """The RKNN session restarts on a fresh prompt, so it must not be asked to "continue"."""
+        orch = object.__new__(Orchestrator)
+        orch._chat_turns = []
+        orch.history_idle_clear_sec = 0
+        orch.history_max_turns = 0
+        orch.system_prompt = "只用完整短句回答。"
+        orch.socket_path = "/ignored"
+        orch.max_new_tokens = 8
+        orch._tts_abort = False
+        orch._active_turn_id = 10
+        orch._active_tts_text = ""
+        orch._last_spoken_turn = ""
+        orch._last_tts_end_at = 0.0
+        orch._listen_cooldown_until = 0.0
+        orch.listen_cooldown_sec = 0.2
+        orch._paused_relay_text = None
+        orch._current_splitter = None
+        orch._speaking = False
+        orch.state = AgentState.LLM
+        orch.tts_queue = FakeTtsQueue()
+
+        async def emit(event: dict) -> None:
+            return None
+
+        async def prepare() -> None:
+            return None
+
+        orch.emit = emit  # type: ignore[method-assign]
+        orch._prepare_llm_call = prepare  # type: ignore[method-assign]
+        orch.set_state = lambda state: None  # type: ignore[method-assign]
+
+        calls: list[str] = []
+
+        def fake_stream(prompt: str, on_token, **kwargs):
+            calls.append(prompt)
+            if len(calls) > 1:
+                raise AssertionError("a new prompt would restart the RKNN answer")
+            on_token("第一段已经讲到这里。")
+            return {"text": "第一段已经讲到这里。", "ttft_s": 0.01, "finish_reason": "length"}
+
+        with patch("orchestrator.main.llm_chat_stream", fake_stream), patch(
+            "orchestrator.main.llm_clear_history"
+        ):
+            await orch._run_llm("请完整解释这个复杂问题", generation=10, vad_end_at=time.monotonic())
+
+        self.assertEqual(
+            orch.tts_queue.enqueued,
+            [("第一段已经讲到这里。", 10)],
+        )
+        self.assertEqual(len(calls), 1)
+
+    async def test_streaming_turn_does_not_continue_on_a_normal_daemon_finish(self) -> None:
+        """The daemon's completion state, not its diagnostic counter, decides continuation."""
+        orch = object.__new__(Orchestrator)
+        orch._chat_turns = []
+        orch.history_idle_clear_sec = 0
+        orch.history_max_turns = 0
+        orch.system_prompt = "只用完整短句回答。"
+        orch.socket_path = "/ignored"
+        orch.max_new_tokens = 8
+        orch._tts_abort = False
+        orch._active_turn_id = 11
+        orch._active_tts_text = ""
+        orch._last_spoken_turn = ""
+        orch._last_tts_end_at = 0.0
+        orch._listen_cooldown_until = 0.0
+        orch.listen_cooldown_sec = 0.2
+        orch._paused_relay_text = None
+        orch._current_splitter = None
+        orch._speaking = False
+        orch.state = AgentState.LLM
+        orch.tts_queue = FakeTtsQueue()
+
+        async def emit(event: dict) -> None:
+            return None
+
+        async def prepare() -> None:
+            return None
+
+        orch.emit = emit  # type: ignore[method-assign]
+        orch._prepare_llm_call = prepare  # type: ignore[method-assign]
+        orch.set_state = lambda state: None  # type: ignore[method-assign]
+        calls: list[str] = []
+
+        def fake_stream(prompt: str, on_token, **kwargs):
+            calls.append(prompt)
+            on_token("这一段已经完整结束。")
+            return {
+                "text": "这一段已经完整结束。",
+                "ttft_s": 0.01,
+                "finish_reason": "stop",
+                "usage": {"tokens": 8192},
+            }
+
+        with patch("orchestrator.main.llm_chat_stream", fake_stream), patch(
+            "orchestrator.main.llm_clear_history"
+        ):
+            await orch._run_llm("请解释这个复杂问题", generation=11, vad_end_at=time.monotonic())
+
+        self.assertEqual(orch.tts_queue.enqueued, [("这一段已经完整结束。", 11)])
+        self.assertEqual(len(calls), 1)
 
     async def test_streaming_turn_suppresses_repeated_model_clauses_and_history(self) -> None:
         orch = object.__new__(Orchestrator)

@@ -23,7 +23,7 @@ export MIC_ARM_INTERVAL=0.06
 # Playback: auto-normalize quiet TTS/monitor to ~26k peak (max 8x)
 export PLAYBACK_NORMALIZE=1
 export PLAYBACK_GAIN=4.5
-export PLAYBACK_TARGET_PEAK=26000
+export PLAYBACK_TARGET_PEAK=32767
 export PLAYBACK_MAX_GAIN=8.0
 export PLAYBACK_RATE=16000
 export PLAYBACK_WARMUP_SEC=0.12
@@ -49,9 +49,8 @@ bash "${SPEAKER_SETUP_SCRIPT}" >/dev/null
 PULSE_SERVER="${PULSE_SERVER:-unix:/tmp/pulse-socket}"
 pactl -s "${PULSE_SERVER}" set-sink-port \
   alsa_output.platform-es8388-sound.HiFi__hw_rockchipes8388__sink \
-  '[Out] Headphones' 2>/dev/null || true
+  '[Out] Speaker' 2>/dev/null || true
 pactl -s "${PULSE_SERVER}" set-sink-volume \
   alsa_output.platform-es8388-sound.HiFi__hw_rockchipes8388__sink 100% 2>/dev/null || true
 amixer -c 0 sset 'Headphone' on 100% 2>/dev/null || true
 amixer -c 0 sset 'Speaker' on 100% 2>/dev/null || true
-

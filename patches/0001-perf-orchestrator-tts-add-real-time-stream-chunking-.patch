@@ -1,0 +1,307 @@
+From 92885a0453ffe06d398ca7e8597e9674419fe2f8 Mon Sep 17 00:00:00 2001
+From: Wangpengyu01 <m13937429165_1@163.com>
+Date: Tue, 8 Sep 2026 20:58:33 +0800
+Subject: [PATCH] perf(orchestrator,tts): add real-time stream-chunking TTS,
+ VAD 250ms latency compression, and intelligent barge-in
+
+---
+ agent/config/agent.yaml     | 25 ++++++------
+ agent/orchestrator/main.py  | 70 ++++++++++++++++++++++++--------
+ agent/tts/sentence_split.py | 81 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 147 insertions(+), 29 deletions(-)
+
+diff --git a/agent/config/agent.yaml b/agent/config/agent.yaml
+index 7998e70..de84190 100644
+--- a/agent/config/agent.yaml
++++ b/agent/config/agent.yaml
+@@ -1,13 +1,12 @@
+ # R1 agent — llm_daemon + orchestrator (Phase A/B)
+ system_prompt: |
+   你是 youyeetoo R1 智能语音助手小揽。
+-  你说话风格自然亲切、生动风趣、有问必答。
+-  【重要要求】：
+-  1. 请用口语化中文回答，多用逗号、句号自然断句，适合语音朗读。
+-  2. 严格禁止使用任何 Markdown 格式（严禁使用粗体、数字列表序号、分点符号、冒号排版）。
+-  3. 遇到英文单词或专业词汇，请直接用中文或地道中文意思回答（如 AI 说“人工智能”，OK 说“好的”，Intern 说“小揽”），确保语音清晰自然。
+-  4. 回答简明扼要，控制在两到三句话以内。
+-max_new_tokens: 256
++  你说话风格自然亲切、口语化、有问必答。
++  【核心要求】：
++  1. 必须使用纯中文口语回答，严禁输出任何英文字母或英文单词，遇到专业术语请使用中文全称。
++  2. 严格禁止使用任何 Markdown 排版、列表符号或冒号。
++  3. 遇到复杂问题时，请遵循金字塔法则：先用一句话给出核心结论，再简要解释原理，整体控制在两到三句话以内（60字以内），适合简短语音交流。
++max_new_tokens: 120
+ # Multi-turn: replay last N (user, assistant) pairs in each prompt (OpenAI-style sliding window)
+ history_max_turns: 2
+ # Drop transcript after this many seconds without an LLM turn (0 = keep until reboot)
+@@ -20,21 +19,21 @@ vad:
+   sample_rate: 16000
+   chunk_ms: 100
+   threshold: 0.5
+-  min_silence_duration: 0.4
++  min_silence_duration: 0.25
+   min_speech_duration: 0.20
+   max_speech_duration: 30.0
+   min_segment_sec: 0.5
+   speech_preroll_ms: 450
+-  listen_cooldown_sec: 0.5
+-  listen_cooldown_skip_max_sec: 0.45
++  listen_cooldown_sec: 0.35
++  listen_cooldown_skip_max_sec: 0.30
+   alsa_device: plughw:0,0
+   arecord_period_size: 320
+   arecord_buffer_size: 2560
+   mic_capture_gain: 6
+ 
+ barge_in:
+-  enabled: false
+-  min_speech_sec: 0.35
++  enabled: true
++  min_speech_sec: 0.45
+ 
+ paths:
+   agent_root: /userdata/agent
+@@ -47,7 +46,7 @@ asr:
+   decoder: decoder.int8.onnx
+   tokens: tokens.txt
+   sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
+-  num_threads: 2
++  num_threads: 4
+   partial_interval_sec: 0.8
+   partial_min_sec: 0.6
+   partial_enabled: true
+diff --git a/agent/orchestrator/main.py b/agent/orchestrator/main.py
+index f273ca6..fcc0da9 100644
+--- a/agent/orchestrator/main.py
++++ b/agent/orchestrator/main.py
+@@ -24,6 +24,7 @@ from llm.client import llm_chat_stream, llm_clear_history, llm_ping
+ from orchestrator.config_loader import load_yaml
+ from orchestrator.events import AgentState
+ from tts.sentence_split import (
++    StreamingSentenceSplitter,
+     canned_reply_for,
+     clean_llm_reply,
+     extract_speak_sentences,
+@@ -204,6 +205,11 @@ class Orchestrator:
+         async def on_partial(text: str) -> None:
+             LOG.info("[event] asr_partial: %s", text)
+             await self.emit({"type": "asr_partial", "text": text})
++            if self.barge_in_enabled and self._speaking and text.strip():
++                clean_p = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", text)
++                if re.search(r"(停|别|闭嘴|算了|打住|不要|等一下|小揽|重置)", clean_p) or len(clean_p) >= 2:
++                    LOG.info("[barge-in] fast trigger on user speech: %s", text)
++                    await self._interrupt_tts()
+ 
+         async def on_final(text: str, meta: dict) -> None:
+             LOG.info("[event] asr_final: %s", text or meta.get("status"))
+@@ -215,7 +221,7 @@ class Orchestrator:
+     async def _interrupt_tts(self) -> None:
+         if not self._speaking:
+             return
+-        LOG.info("[barge-in] interrupt TTS playback")
++        LOG.info("[barge-in] interrupt TTS playback immediately")
+         self._tts_abort = True
+         self._listen_cooldown_until = 0.0
+         await self.tts_queue.interrupt()
+@@ -251,8 +257,6 @@ class Orchestrator:
+                 continue
+             if etype == "speech_start":
+                 LOG.info("[event] speech_start")
+-                if self.barge_in_enabled and self._speaking:
+-                    await self._interrupt_tts()
+                 self._new_asr_session()
+                 await self._asr_session.start()
+                 continue
+@@ -386,11 +390,17 @@ class Orchestrator:
+         user_prompt = prompt
+         self.set_state(AgentState.LLM)
+ 
+-        if re.search(r"^(重置|重新开始|清空历史|刷新|重新聊|别说了|闭嘴|算了|打住)[了]?$", user_prompt.strip()):
++        u_clean = user_prompt.strip()
++        if re.search(r"^(重置|重新开始|清空历史|刷新|重新聊|别说了|闭嘴|算了|打住|停|停止|停下)[了]?$", u_clean):
+             self._chat_turns.clear()
+             await asyncio.to_thread(llm_clear_history, self.socket_path)
+-            LOG.info("[llm] user requested session reset")
+-            await self._speak_turn("好的，已为您重置对话，我们重新开始吧！")
++            LOG.info("[llm] user requested session reset / stop")
++            await self._speak_turn("好的。")
++            return
++
++        if len(u_clean) <= 1 or re.search(r"^[啊嗯呃哦用呀吧呵哈嘿]+$", u_clean):
++            LOG.info("[llm] ignored single char or filler noise: %s", u_clean)
++            self.set_state(AgentState.LISTEN)
+             return
+ 
+         if should_skip_llm(user_prompt):
+@@ -410,6 +420,8 @@ class Orchestrator:
+         )
+         buffer = {"text": ""}
+         loop = asyncio.get_running_loop()
++        splitter = StreamingSentenceSplitter(min_clause_chars=8, max_clause_chars=22)
++        tts_state: dict[str, int | bool] = {"n": 0, "canned": False}
+ 
+         def on_token(piece: str) -> None:
+             if self._tts_abort:
+@@ -419,6 +431,17 @@ class Orchestrator:
+                 self.emit({"type": "llm_token", "text": piece}),
+                 loop,
+             )
++            chunks = splitter.feed(piece)
++            for ch in chunks:
++                if self._tts_abort:
++                    break
++                if int(tts_state["n"]) == 0:
++                    self.set_state(AgentState.TTS)
++                    self._speaking = True
++                asyncio.run_coroutine_threadsafe(
++                    self._enqueue_speak(ch, tts_state),
++                    loop,
++                )
+ 
+         try:
+             reply = await asyncio.to_thread(
+@@ -428,27 +451,42 @@ class Orchestrator:
+                 sock_path=self.socket_path,
+                 max_new_tokens=self.max_new_tokens,
+             )
++            rem = splitter.finish()
++            for ch in rem:
++                if self._tts_abort:
++                    break
++                if int(tts_state["n"]) == 0:
++                    self.set_state(AgentState.TTS)
++                    self._speaking = True
++                await self._enqueue_speak(ch, tts_state)
++
+             full = clean_llm_reply(user_prompt, reply["text"])
+ 
+             # 循环重复死锁破除：如果回答与上一轮一模一样，或者重复上一句
+             if self._chat_turns and full.strip() and full.strip() == self._chat_turns[-1][1].strip():
+                 LOG.warning("[llm] detected repetition loop with previous turn: %s, breaking out", full[:40])
+                 self._chat_turns.clear()
+-                full = "在呢，请问有什么我可以帮您的吗？"
++                if not self._tts_abort:
++                    await self.tts_queue.interrupt()
++                    await self._speak_turn("在呢，请问有什么我可以帮您的吗？")
++                return
+ 
+-            need_fallback = not full.strip()
+-            spoken = ""
+-            if not self._tts_abort and need_fallback:
+-                await self.tts_queue.discard_pending()
++            if int(tts_state["n"]) == 0 and not self._tts_abort:
+                 speak = persona_reply_for(user_prompt)
+-                spoken = speak
+                 LOG.info("[llm] persona fallback: %s", speak[:48])
+                 await self._speak_extracted(speak, canned=True)
++                full = speak
+             elif not self._tts_abort:
+-                spoken = full
+-                await self._speak_extracted(full, canned=False)
+-            if not self._tts_abort and spoken.strip():
+-                self._record_chat_turn(user_prompt, spoken)
++                try:
++                    await self.tts_queue.wait_done()
++                finally:
++                    self._speaking = False
++
++            if not self._tts_abort:
++                self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
++                if full.strip():
++                    self._record_chat_turn(user_prompt, full)
++
+             LOG.info(
+                 "[llm] reply (%d chars, ttft=%.3fs): %s",
+                 len(full),
+diff --git a/agent/tts/sentence_split.py b/agent/tts/sentence_split.py
+index 0f5560d..9fe9a37 100644
+--- a/agent/tts/sentence_split.py
++++ b/agent/tts/sentence_split.py
+@@ -290,3 +290,84 @@ def extract_speak_sentences(text: str, max_cjk: int = 99999, *, max_chunk_len: i
+ def flush_remainder(buffer: str) -> list[str]:
+     text = sanitize_tts_text(buffer)
+     return [text] if is_speakable(text) else []
++
++
++class StreamingSentenceSplitter:
++    """Consumes LLM tokens in real-time, emitting speakable clauses/sentences as early as possible."""
++
++    def __init__(self, min_clause_chars: int = 8, max_clause_chars: int = 24):
++        self.min_clause_chars = min_clause_chars
++        self.max_clause_chars = max_clause_chars
++        self._buf = ""
++        self._think_active = False
++
++    def feed(self, piece: str) -> list[str]:
++        self._buf += piece
++        if "<think>" in self._buf:
++            self._think_active = True
++        if self._think_active:
++            if "</think>" in self._buf:
++                self._buf = self._buf.split("</think>", 1)[1]
++                self._think_active = False
++            else:
++                return []
++
++        # Strip prefixes and special tokens
++        self._buf = re.sub(r"^小揽[：:]\s*", "", self._buf)
++        self._buf = re.sub(r"<\|.*?\|>", "", self._buf)
++
++        chunks: list[str] = []
++        while True:
++            # 1. Check for sentence-ending punctuation (。！？!?\n)
++            m = re.search(r"[。！？!?\n]+", self._buf)
++            if m:
++                end_pos = m.end()
++                raw_chunk = self._buf[:end_pos].strip()
++                self._buf = self._buf[end_pos:]
++                clean = sanitize_tts_text(raw_chunk)
++                if is_speakable(clean):
++                    if not clean.endswith(("。", "！", "？")):
++                        clean += "。"
++                    chunks.append(clean)
++                continue
++
++            # 2. Check for clause boundaries (，,；;) when buffer has enough characters
++            m_comma = re.search(r"[，,；;]+", self._buf)
++            if m_comma and m_comma.start() >= self.min_clause_chars:
++                end_pos = m_comma.end()
++                raw_chunk = self._buf[:end_pos].strip()
++                self._buf = self._buf[end_pos:]
++                clean = sanitize_tts_text(raw_chunk)
++                if is_speakable(clean):
++                    if not clean.endswith(("。", "！", "？", "，")):
++                        clean += "。"
++                    chunks.append(clean)
++                continue
++
++            # 3. Buffer length safety cap
++            if len(self._buf) >= self.max_clause_chars:
++                raw_chunk = self._buf[: self.max_clause_chars].strip()
++                self._buf = self._buf[self.max_clause_chars :]
++                clean = sanitize_tts_text(raw_chunk)
++                if is_speakable(clean):
++                    if not clean.endswith(("。", "！", "？")):
++                        clean += "。"
++                    chunks.append(clean)
++                continue
++
++            break
++
++        return chunks
++
++    def finish(self) -> list[str]:
++        if not self._buf.strip():
++            return []
++        raw = self._buf.strip()
++        self._buf = ""
++        clean = sanitize_tts_text(raw)
++        if is_speakable(clean):
++            if not clean.endswith(("。", "！", "？")):
++                clean += "。"
++            return [clean]
++        return []
++
+-- 
+2.53.0.windows.2
+

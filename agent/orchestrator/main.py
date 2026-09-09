@@ -264,6 +264,18 @@ class Orchestrator:
         async def on_final(text: str, meta: dict) -> None:
             LOG.info("[event] asr_final: %s", text or meta.get("status"))
             await self.emit({"type": "asr_final", "text": text, "meta": meta})
+            if self.barge_in_enabled and self._speaking and text.strip():
+                clean_f = normalize_spoken_text(text)
+                cur_speak = (
+                    (self._active_tts_text or "")
+                    + " "
+                    + (getattr(self.tts_queue, "_current_speaking_chunk", "") or "")
+                    + " "
+                    + (self._last_spoken_turn or "")
+                ).strip()
+                if is_stop_command(clean_f) and not (cur_speak and is_self_echo(cur_speak, clean_f)):
+                    LOG.info("[barge-in] final stop command matched: %s", clean_f)
+                    await self._interrupt_tts()
 
         session = self.asr_engine.create_session(on_partial, on_final)
         self._asr_session = session
@@ -513,6 +525,9 @@ class Orchestrator:
         prompt += f"<|im_start|>user\n{user_text.strip()}<|im_end|>\n<|im_start|>assistant\n"
         return prompt
 
+    def _reply_hit_segment_limit(self, reply: dict) -> bool:
+        return reply.get("finish_reason") == "length"
+
     def _record_chat_turn(self, user: str, assistant: str) -> None:
         if self.history_max_turns <= 0:
             self._chat_turns.clear()
@@ -591,6 +606,7 @@ class Orchestrator:
             loop.call_soon_threadsafe(token_queue.put_nowait, piece)
 
         try:
+            reply_parts: list[str] = []
             llm_task = asyncio.create_task(
                 asyncio.to_thread(
                     llm_chat_stream,
@@ -620,6 +636,13 @@ class Orchestrator:
                         await self.emit({"type": "llm_token", "text": chunk})
 
             reply = await llm_task
+            reply_parts.append(str(reply.get("text") or ""))
+            if self._reply_hit_segment_limit(reply):
+                LOG.warning(
+                    "[llm] RKNN reached the %d-token generation window; not re-prompting because that restarts the answer",
+                    self.max_new_tokens,
+                )
+
             if not self._tts_abort and generation == self._active_turn_id:
                 for chunk in splitter.finish():
                     if is_echo_reply(user_prompt, chunk):
@@ -629,7 +652,7 @@ class Orchestrator:
                     if queued:
                         await self.emit({"type": "llm_token", "text": chunk})
 
-            full = clean_llm_reply(user_prompt, reply["text"])
+            full = clean_llm_reply(user_prompt, "".join(reply_parts))
 
             if is_echo_reply(user_prompt, full):
                 LOG.warning("[llm] detected echo reply ('%s' -> '%s'), wiping history", user_prompt, full)
