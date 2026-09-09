@@ -80,5 +80,5 @@ def is_resume_command(text: str) -> bool:
 
 
 def can_barge_in(partial_text: str, speech_sec: float, min_speech_sec: float) -> bool:
-    """Require both stable spoken content and configured speech duration."""
-    return len(normalize_spoken_text(partial_text)) >= 2 and speech_sec >= min_speech_sec
+    """Accept the first distinct recognized syllable after a short voice gate."""
+    return bool(normalize_spoken_text(partial_text)) and speech_sec >= min_speech_sec

@@ -42,7 +42,10 @@ vad:
 
 barge_in:
   enabled: true
-  min_speech_sec: 0.25
+  # A distinct ASR partial may be just one syllable (for example “喂”).
+  # The self-echo guard runs before this gate, so this stays responsive
+  # without letting the speaker's own words stop playback.
+  min_speech_sec: 0.15
 
 paths:
   agent_root: /userdata/agent

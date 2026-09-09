@@ -28,9 +28,9 @@ class DialoguePolicyTests(unittest.TestCase):
         self.assertFalse(is_resume_command("继续教育怎么报名"))
 
     def test_barge_in_waits_for_configured_speech_duration(self) -> None:
-        self.assertFalse(can_barge_in("你", 0.40, 0.25))
-        self.assertFalse(can_barge_in("你好", 0.20, 0.25))
-        self.assertTrue(can_barge_in("你好", 0.25, 0.25))
+        self.assertFalse(can_barge_in("喂", 0.14, 0.15))
+        self.assertFalse(can_barge_in("", 0.40, 0.15))
+        self.assertTrue(can_barge_in("喂", 0.15, 0.15))
 
 
 if __name__ == "__main__":

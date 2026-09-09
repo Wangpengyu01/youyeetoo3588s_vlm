@@ -63,6 +63,81 @@ class StreamingTurnTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(interrupts, ["stop"])
 
+    async def test_single_non_echo_partial_interrupts_active_tts(self) -> None:
+        """A user saying one distinct syllable must barge in before ASR finalizes."""
+        orch = object.__new__(Orchestrator)
+        orch.barge_in_enabled = True
+        orch.barge_in_min_sec = 0.15
+        orch._speaking = True
+        orch._active_tts_text = "这是一段正在播放的回答。"
+        orch._last_spoken_turn = ""
+        orch.tts_queue = type("Queue", (), {"_current_speaking_chunk": "正在播放。"})()
+        orch._asr_session = None
+        interrupts: list[str] = []
+
+        class Session:
+            buffer_sec = 0.15
+
+        class CapturingAsrEngine:
+            def create_session(self, on_partial, on_final):
+                self.on_partial = on_partial
+                self.on_final = on_final
+                return Session()
+
+        engine = CapturingAsrEngine()
+        orch.asr_engine = engine
+
+        async def emit(event: dict) -> None:
+            return None
+
+        async def interrupt() -> None:
+            interrupts.append("barge-in")
+
+        orch.emit = emit  # type: ignore[method-assign]
+        orch._interrupt_tts = interrupt  # type: ignore[method-assign]
+        orch._new_asr_session()
+
+        await engine.on_partial("喂")
+
+        self.assertEqual(interrupts, ["barge-in"])
+
+    async def test_speech_start_does_not_interrupt_tts_before_echo_is_classified(self) -> None:
+        """A raw VAD onset can be the speaker itself and must not self-abort TTS."""
+        orch = object.__new__(Orchestrator)
+        orch.vad_queue = asyncio.Queue()
+        orch._turn_queue = asyncio.Queue()
+        orch._speaking = True
+        orch._turn_busy = True
+        orch._asr_session = None
+        orch.barge_in_enabled = True
+        orch.mute_mic_during_tts = False
+        interrupts: list[str] = []
+
+        async def interrupt() -> None:
+            interrupts.append("vad-onset")
+            orch._speaking = False
+
+        def set_state(state) -> None:
+            return None
+
+        class Session:
+            async def start(self) -> None:
+                return None
+
+        class AsrEngine:
+            def create_session(self, on_partial, on_final):
+                return Session()
+
+        orch._interrupt_tts = interrupt  # type: ignore[method-assign]
+        orch.set_state = set_state  # type: ignore[method-assign]
+        orch.asr_engine = AsrEngine()
+        await orch.vad_queue.put({"type": "speech_start"})
+        await orch.vad_queue.put({"type": "shutdown"})
+
+        await orch.handle_events()
+
+        self.assertEqual(interrupts, [])
+
     def test_zero_history_omits_prior_turns_from_the_llm_prompt(self) -> None:
         orch = object.__new__(Orchestrator)
         orch.system_prompt = "只回答当前问题。"
