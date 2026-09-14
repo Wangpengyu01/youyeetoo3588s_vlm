@@ -268,7 +268,7 @@ def is_echo_reply(user_text: str, reply: str) -> bool:
     return False
 
 
-_PRESENCE = re.compile(r"^(你?在[吗嘛]|人呢|你在[哪哪儿]|在不在|小揽)[呀啊吧]?$")
+_PRESENCE = re.compile(r"^(?:你?在[吗嘛]|人呢|你在[哪哪儿]|在不在|(?:你好|电好|男好|嘿|嗨|喂)?小揽)[呀啊吧呢]?$")
 
 
 def persona_reply_for(user_text: str) -> str:

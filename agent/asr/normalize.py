@@ -39,11 +39,9 @@ def normalize_user_text(text: str) -> str:
     text = _GRAVITY_FIX.sub("你都", text)
     text = _NAME_HOMOPHONE.sub("小揽", text)
     text = _NAME_FIX.sub("小揽", text)
-    if text == "小揽":
+    if re.match(r"^(?:你好|电好|男好|嘿|嗨|喂)?小揽[呀啊吧呢]?$", text):
         return "小揽"
-    if text in ("你好小揽", "电好小揽", "男好小揽"):
-        return "你好"
-    m_name = re.match(r"^(?:你好|电好|男好)?小揽[，,、\s]*(.+)$", text)
+    m_name = re.match(r"^(?:你好|电好|男好|嘿|嗨|喂)?小揽[，,、\s]*(.+)$", text)
     if m_name:
         text = m_name.group(1)
     text = _LEADING_JUNK.sub("", text)

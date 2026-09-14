@@ -89,9 +89,10 @@ class VisionTurnTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(orch, "_grab_camera_frame", return_value=True),              patch.object(orch, "_prepare_vlm_frame", return_value=True),              patch.object(orch, "_infer_vlm", return_value="桌上放着一盒抽纸和一个白色水杯。"):
             await orch._run_llm("看看桌上放了什么", generation=1, vad_end_at=time.monotonic())
 
-        self.assertEqual(len(spoken), 1)
-        self.assertEqual(spoken[0][0], "桌上放着一盒抽纸和一个白色水杯。")
-        self.assertEqual(spoken[0][1], 1)
+        self.assertEqual(len(spoken), 2)
+        self.assertIn("观察画面", spoken[0][0])
+        self.assertEqual(spoken[1][0], "桌上放着一盒抽纸和一个白色水杯。")
+        self.assertEqual(spoken[1][1], 1)
         event_types = [e["type"] for e in events]
         self.assertIn("vision_start", event_types)
         self.assertIn("vision_caption", event_types)
@@ -134,8 +135,9 @@ class VisionTurnTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(orch, "_grab_camera_frame", return_value=False):
             await orch._run_llm("这是什么东西", generation=2, vad_end_at=time.monotonic())
 
-        self.assertEqual(len(spoken), 1)
-        self.assertIn("摄像头暂时连接不上", spoken[0][0])
+        self.assertEqual(len(spoken), 2)
+        self.assertIn("观察画面", spoken[0][0])
+        self.assertIn("摄像头暂时连接不上", spoken[1][0])
         event_types = [e["type"] for e in events]
         self.assertIn("vision_error", event_types)
 
