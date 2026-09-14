@@ -36,9 +36,8 @@ vad:
   arecord_period_size: 320
   arecord_buffer_size: 2560
   mic_capture_gain: 8
-  # Keep listening during playback so “停” can interrupt. The barge-in path
-  # filters assistant echo before it acts on recognized speech.
-  mute_mic_during_tts: false
+  # Mute mic during playback to completely eliminate self-interruption/stuttering
+  mute_mic_during_tts: true
 
 barge_in:
   enabled: true
@@ -93,7 +92,8 @@ camera:
   timeout: 2.5
   size: 448
   prompt: "用一句话简短描述画面中的核心物品和场景。"
-  vlm_cmd: "/userdata/p4/scripts/vlm_see.sh"
+  # Set vlm_cmd to empty while llm_daemon is active to prevent RK1828 session contention
+  vlm_cmd: ""
   api_url: ""
   api_key: ""
   model: "qwen-vl-plus"

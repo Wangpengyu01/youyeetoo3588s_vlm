@@ -403,6 +403,12 @@ class Orchestrator:
                 continue
             if etype == "audio_segment":
                 duration = float(event.get("duration_sec", 0.0))
+                if self.mute_mic_during_tts:
+                    end_at = float(event.get("end_at") or time.monotonic())
+                    start_at = end_at - duration
+                    if start_at < (getattr(self, "_last_tts_end_at", 0.0) or 0.0):
+                        LOG.info("[vad] mute_mic_during_tts: dropped playback echo segment (%.2fs)", duration)
+                        continue
                 if self._speaking:
                     if duration >= self.barge_in_min_sec:
                         LOG.info("[vad] speaking turn, queuing potential user speech (%.2fs)", duration)
@@ -663,28 +669,29 @@ class Orchestrator:
                 LOG.warning("[vision] cloud VLM call failed: %s", exc)
 
         # 2. Board RKNN VLM script if available
-        vlm_cmd = Path(self.camera_vlm_cmd)
-        if not vlm_cmd.is_absolute():
-            vlm_cmd = self.agent_root / vlm_cmd
-        if vlm_cmd.exists():
-            try:
-                cmd = ["bash", str(vlm_cmd), str(frame_path), prompt]
-                LOG.info("[vision] running board VLM command: %s", cmd)
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
-                if res.returncode == 0:
-                    lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
-                    content_lines = [
-                        ln for ln in lines
-                        if not ln.startswith("[VLM]")
-                        and not ln.startswith("[RKNN]")
-                        and not ln.startswith("[P4]")
-                    ]
-                    if content_lines:
-                        return content_lines[-1]
-                else:
-                    LOG.warning("[vision] board VLM command exited with %d: %s", res.returncode, res.stderr or res.stdout)
-            except Exception as exc:
-                LOG.warning("[vision] board VLM command failed: %s", exc)
+        if self.camera_vlm_cmd:
+            vlm_cmd = Path(self.camera_vlm_cmd)
+            if not vlm_cmd.is_absolute():
+                vlm_cmd = self.agent_root / vlm_cmd
+            if vlm_cmd.is_file():
+                try:
+                    cmd = ["bash", str(vlm_cmd), str(frame_path), prompt]
+                    LOG.info("[vision] running board VLM command: %s", cmd)
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+                    if res.returncode == 0:
+                        lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
+                        content_lines = [
+                            ln for ln in lines
+                            if not ln.startswith("[VLM]")
+                            and not ln.startswith("[RKNN]")
+                            and not ln.startswith("[P4]")
+                        ]
+                        if content_lines:
+                            return content_lines[-1]
+                    else:
+                        LOG.warning("[vision] board VLM command exited with %d: %s", res.returncode, res.stderr or res.stdout)
+                except Exception as exc:
+                    LOG.warning("[vision] board VLM command failed: %s", exc)
 
         # 3. Fallback: simple natural confirmation
         return "好的，已经拍下当前画面了。"
@@ -728,8 +735,8 @@ class Orchestrator:
             await self._speak_turn("摄像头暂时连接不上，请确认摄像头已打开。", generation=generation)
             return
 
-        if not caption:
-            caption = "我已经获取到了画面，但暂时未能识别出具体物品。"
+        if not caption or caption == "好的，已经拍下当前画面了。":
+            caption = "画面中未识别到具体物品。"
 
         LOG.info("[vision] caption ready in %.2fs: %s", time.monotonic() - t0, caption)
         await self.emit({"type": "vision_caption", "caption": caption, "generation": generation})

@@ -184,8 +184,25 @@ def user_asked_name(user_text: str) -> bool:
     return bool(_NAME.search(user_text))
 
 
+_THINKING_PREFIX = re.compile(
+    r"^(?:"
+    r"(?:【?思考(?:过程)?】?|Thought(?:s)?)[：:\s]+.*?(?:\n|$)|"
+    r"好的[，,。]*(?:我[来帮]?看[看一下]+|让我[来]?看[看一下]+|让我[来]?查[一下]+|我正在[想看查]|让我[来]?想想|我来帮你看看|我[来]?告诉你|请稍等|请稍候)[，,。]*|"
+    r"我[来帮]?看[看一下]+[，,。]*|"
+    r"让我[来]?看[看一下]+[，,。]*|"
+    r"我正在[想看查][，,。]*|"
+    r"正在为你(?:查询|搜索|生成|分析|思考)[，,。]*|"
+    r"让我[来]?想想[看]?[，,。]*|"
+    r"我思考了一下[，,。]*|"
+    r"请稍[等候][，,。]*|"
+    r"请把你的手伸过来[，,。]*|"
+    r"让我看看你面前的桌面[，,。]*"
+    r")"
+)
+
+
 def clean_llm_reply(user_text: str, reply: str) -> str:
-    """Strip spurious self-intro and thinking tags."""
+    """Strip spurious self-intro, thinking tags, and preamble filler."""
     text = (reply or "").strip()
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     text = re.sub(r"</?think>", "", text)
@@ -193,6 +210,7 @@ def clean_llm_reply(user_text: str, reply: str) -> str:
     text = re.sub(r"^小揽[：:]\s*", "", text)
     if not user_asked_name(user_text):
         text = _INTRO_PREFIX.sub("", text).strip()
+    text = _THINKING_PREFIX.sub("", text).strip("，,。！？ ")
     if not user_asked_name(user_text) and _NAME_ONLY.match(sanitize_tts_text(text)):
         return ""
     return text.strip()
@@ -431,6 +449,8 @@ class StreamingSentenceSplitter:
                 raw_chunk = self._buf[:cut_end].strip()
                 self._buf = self._buf[cut_end:]
                 clean = sanitize_tts_text(raw_chunk)
+                if not self._first_chunk_emitted:
+                    clean = _THINKING_PREFIX.sub("", clean).strip("，,。！？ ")
                 if is_speakable(clean):
                     if is_clause:
                         if not clean.endswith(("。", "！", "？", "，")):
@@ -473,6 +493,8 @@ class StreamingSentenceSplitter:
         raw = re.sub(r"</?think>", "", raw)
         raw = re.sub(r"<.*?>", "", raw)
         clean = sanitize_tts_text(raw)
+        if not self._first_chunk_emitted:
+            clean = _THINKING_PREFIX.sub("", clean).strip("，,。！？ ")
         if is_speakable(clean):
             if not clean.endswith(("。", "！", "？")):
                 clean += "。"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -187,5 +188,6 @@ class VadStream:
                         "samples": segment,
                         "duration_sec": duration_sec,
                         "start": payload.start,
+                        "end_at": time.monotonic(),
                     }
                 )

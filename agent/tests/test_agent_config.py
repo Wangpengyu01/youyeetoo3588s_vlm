@@ -12,9 +12,9 @@ from orchestrator.config_loader import load_yaml  # noqa: E402
 
 
 class AgentConfigTests(unittest.TestCase):
-    def test_default_mode_keeps_capture_during_tts_for_stop_commands(self) -> None:
+    def test_default_mode_mutes_mic_during_tts_to_prevent_feedback(self) -> None:
         cfg = load_yaml(AGENT_ROOT / "config" / "agent.yaml")
-        self.assertEqual(cfg["vad"]["mute_mic_during_tts"], "false")
+        self.assertIn(str(cfg["vad"]["mute_mic_during_tts"]).lower(), ("true", "1"))
 
     def test_default_mode_omits_unreliable_llm_history(self) -> None:
         cfg = load_yaml(AGENT_ROOT / "config" / "agent.yaml")
