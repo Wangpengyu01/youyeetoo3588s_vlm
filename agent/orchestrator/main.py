@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +29,7 @@ from orchestrator.dialogue_policy import (
     can_barge_in,
     is_resume_command,
     is_stop_command,
+    is_vision_query,
     normalize_spoken_text,
 )
 from orchestrator.events import AgentState
@@ -55,6 +60,16 @@ def setup_logging(level: str = "INFO") -> None:
 
 
 class Orchestrator:
+    camera_enabled: bool = False
+    camera_url: str = "http://10.0.0.159:8080/shot.jpg"
+    camera_timeout: float = 2.5
+    camera_size: int = 448
+    camera_prompt: str = "用一句话简短描述画面中的核心物品和场景。"
+    camera_vlm_cmd: str = "/userdata/p4/scripts/vlm_see.sh"
+    camera_api_url: str = ""
+    camera_api_key: str = ""
+    camera_model: str = "qwen-vl-plus"
+
     def __init__(self, cfg: dict[str, Any], agent_root: Path) -> None:
         self.cfg = cfg
         self.agent_root = agent_root
@@ -81,6 +96,7 @@ class Orchestrator:
         api_cfg = cfg.get("api") or {}
         paths = cfg.get("paths") or {}
         barge_cfg = cfg.get("barge_in") or {}
+        cam_cfg = cfg.get("camera") or {}
 
         self.event_bus = EventBus()
         self.api_enabled = str(api_cfg.get("enabled", "true")).lower() not in ("0", "false", "no")
@@ -88,6 +104,16 @@ class Orchestrator:
         self.api_port = int(api_cfg.get("port", 8765))
         self.barge_in_enabled = str(barge_cfg.get("enabled", "true")).lower() not in ("0", "false", "no")
         self.barge_in_min_sec = float(barge_cfg.get("min_speech_sec", 0.35))
+
+        self.camera_enabled = str(cam_cfg.get("enabled", "true")).lower() not in ("0", "false", "no")
+        self.camera_url = str(cam_cfg.get("url", "http://10.0.0.159:8080/shot.jpg"))
+        self.camera_timeout = float(cam_cfg.get("timeout", 2.5))
+        self.camera_size = int(cam_cfg.get("size", 448))
+        self.camera_prompt = str(cam_cfg.get("prompt", "用一句话简短描述画面中的核心物品和场景。"))
+        self.camera_vlm_cmd = str(cam_cfg.get("vlm_cmd", "/userdata/p4/scripts/vlm_see.sh"))
+        self.camera_api_url = str(cam_cfg.get("api_url", "")).strip()
+        self.camera_api_key = str(cam_cfg.get("api_key", "")).strip()
+        self.camera_model = str(cam_cfg.get("model", "qwen-vl-plus")).strip()
 
         self.vad_config = VadConfig(
             model_path=vad_cfg.get("model", "/userdata/voice/silero_vad.onnx"),
@@ -548,6 +574,179 @@ class Orchestrator:
     async def _speak_turn(self, text: str, *, generation: int) -> None:
         await self._speak_extracted(text, canned=True, generation=generation)
 
+    def _grab_camera_frame(self, url: str, save_path: Path, timeout: float = 2.5) -> bool:
+        try:
+            if os.path.exists(url):
+                import shutil
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(url, save_path)
+                return True
+            target_url = url.rstrip("/")
+            if not target_url.startswith("file://"):
+                if not target_url.endswith(".jpg") and not target_url.endswith(".jpeg"):
+                    target_url += "/shot.jpg"
+            req = urllib.request.Request(
+                target_url,
+                headers={"User-Agent": "XiaoLan-CameraClient/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+            if not data:
+                return False
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_bytes(data)
+            return True
+        except Exception as exc:
+            LOG.warning("[camera] grab frame from %s failed: %s", url, exc)
+            return False
+
+    def _prepare_vlm_frame(self, src_path: Path, dst_path: Path, size: int = 448) -> bool:
+        try:
+            from PIL import Image
+            im = Image.open(src_path).convert("RGB")
+            w, h = im.size
+            side = min(w, h)
+            left = (w - side) // 2
+            top = (h - side) // 2
+            cropped = im.crop((left, top, left + side, top + side))
+            resized = cropped.resize((size, size), Image.BILINEAR)
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            resized.save(dst_path, format="JPEG", quality=92)
+            return True
+        except Exception as exc:
+            LOG.warning("[camera] prepare frame failed: %s", exc)
+            return False
+
+    def _infer_vlm(self, frame_path: Path, user_prompt: str) -> str:
+        prompt = user_prompt.strip() or self.camera_prompt
+
+        # 1. Cloud VLM API if configured
+        if self.camera_api_url and self.camera_api_key:
+            try:
+                import base64
+                with open(frame_path, "rb") as f:
+                    b64_data = base64.b64encode(f.read()).decode("ascii")
+                endpoint = self.camera_api_url.rstrip("/")
+                if not endpoint.endswith("/chat/completions"):
+                    endpoint += "/chat/completions"
+                payload = {
+                    "model": self.camera_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/jpeg;base64,{b64_data}"},
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": 128,
+                    "temperature": 0.2,
+                }
+                req = urllib.request.Request(
+                    endpoint,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.camera_api_key}",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    res = json.loads(resp.read().decode("utf-8"))
+                cap = str(res["choices"][0]["message"]["content"]).strip()
+                if cap:
+                    return cap
+            except Exception as exc:
+                LOG.warning("[vision] cloud VLM call failed: %s", exc)
+
+        # 2. Board RKNN VLM script if available
+        vlm_cmd = Path(self.camera_vlm_cmd)
+        if not vlm_cmd.is_absolute():
+            vlm_cmd = self.agent_root / vlm_cmd
+        if vlm_cmd.exists():
+            try:
+                cmd = ["bash", str(vlm_cmd), str(frame_path), prompt]
+                LOG.info("[vision] running board VLM command: %s", cmd)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+                lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
+                content_lines = [ln for ln in lines if not ln.startswith("[VLM]")]
+                if content_lines:
+                    return content_lines[-1]
+            except Exception as exc:
+                LOG.warning("[vision] board VLM command failed: %s", exc)
+
+        # 3. Fallback: rule/mock description
+        try:
+            from PIL import Image
+            im = Image.open(frame_path)
+            w, h = im.size
+            gray = im.convert("L")
+            raw_bytes = gray.tobytes()
+            avg_luma = sum(raw_bytes) / len(raw_bytes)
+            if avg_luma < 30:
+                luma_desc = "画面偏暗"
+            elif avg_luma > 200:
+                luma_desc = "画面光线较强"
+            else:
+                luma_desc = "光线良好清晰"
+            return f"网络摄像头画面已正常获取，画面{luma_desc}。"
+        except Exception:
+            return "网络摄像头画面已正常获取。"
+
+    async def _handle_vision_turn(self, user_prompt: str, *, generation: int) -> None:
+        self.set_state(AgentState.LLM)
+        await self.emit({"type": "vision_start", "query": user_prompt, "generation": generation})
+
+        run_dir = self.agent_root / "run"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            run_dir = Path("/tmp")
+        raw_shot_path = run_dir / "camera_shot.jpg"
+        vlm_frame_path = run_dir / "latest_vlm.jpg"
+
+        def _do_grab_and_infer() -> tuple[bool, str]:
+            ok = self._grab_camera_frame(self.camera_url, raw_shot_path, timeout=self.camera_timeout)
+            if not ok:
+                return False, ""
+            prep_ok = self._prepare_vlm_frame(raw_shot_path, vlm_frame_path, size=self.camera_size)
+            if not prep_ok:
+                return False, ""
+            caption = self._infer_vlm(vlm_frame_path, user_prompt)
+            return True, caption
+
+        t0 = time.monotonic()
+        try:
+            success, caption = await asyncio.to_thread(_do_grab_and_infer)
+        except Exception as exc:
+            LOG.error("[vision] exception during vision turn: %s", exc)
+            success, caption = False, ""
+
+        if self._tts_abort or generation != self._active_turn_id:
+            LOG.info("[vision] turn aborted or superseded")
+            return
+
+        if not success:
+            LOG.warning("[vision] camera frame grab failed")
+            await self.emit({"type": "vision_error", "error": "camera_unreachable", "generation": generation})
+            await self._speak_turn("摄像头暂时连接不上，请确认摄像头已打开。", generation=generation)
+            return
+
+        if not caption:
+            caption = "我已经获取到了画面，但暂时未能识别出具体物品。"
+
+        LOG.info("[vision] caption ready in %.2fs: %s", time.monotonic() - t0, caption)
+        await self.emit({"type": "vision_caption", "caption": caption, "generation": generation})
+
+        if not self._tts_abort and generation == self._active_turn_id:
+            self._record_chat_turn(user_prompt, caption)
+            await self._speak_turn(caption, generation=generation)
+            if not self._tts_abort:
+                self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
+
     async def _run_llm(self, prompt: str, *, generation: int, vad_end_at: float) -> None:
         user_prompt = prompt
         self.set_state(AgentState.LLM)
@@ -577,6 +776,11 @@ class Orchestrator:
         if len(normalized) <= 1 or (normalized and set(normalized) <= set("啊嗯呃哦呀吧呵哈嘿")):
             LOG.info("[llm] ignored single char or filler noise: %s", u_clean)
             self.set_state(AgentState.LISTEN)
+            return
+
+        if self.camera_enabled and is_vision_query(normalized):
+            LOG.info("[vision] visual query recognized: %s", u_clean)
+            await self._handle_vision_turn(user_prompt, generation=generation)
             return
 
         if should_skip_llm(user_prompt):

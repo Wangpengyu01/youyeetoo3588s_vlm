@@ -86,3 +86,14 @@ api:
   enabled: true
   host: 127.0.0.1
   port: 8765
+
+camera:
+  enabled: true
+  url: "http://10.0.0.159:8080/shot.jpg"
+  timeout: 2.5
+  size: 448
+  prompt: "用一句话简短描述画面中的核心物品和场景。"
+  vlm_cmd: "/userdata/p4/scripts/vlm_see.sh"
+  api_url: ""
+  api_key: ""
+  model: "qwen-vl-plus"

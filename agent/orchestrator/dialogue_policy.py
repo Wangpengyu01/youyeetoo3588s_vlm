@@ -82,3 +82,29 @@ def is_resume_command(text: str) -> bool:
 def can_barge_in(partial_text: str, speech_sec: float, min_speech_sec: float) -> bool:
     """Accept the first distinct recognized syllable after a short voice gate."""
     return bool(normalize_spoken_text(partial_text)) and speech_sec >= min_speech_sec
+
+
+_VISION_INTENT = re.compile(
+    r"("
+    r"看[看下一]|"
+    r"帮我看|"
+    r"你?能?看[到见懂]|"
+    r"这[是个]?什么|"
+    r"我拿[的着]|"
+    r"拍[个张]照|"
+    r"摄像头|"
+    r"镜头|"
+    r"画面|"
+    r"面前[有是有]|"
+    r"桌[子上面有].*[有看]"
+    r")"
+)
+
+
+def is_vision_query(text: str) -> bool:
+    """Return true if user speech indicates a visual/multimodal inspection question."""
+    clean = re.sub(r"[^\u4e00-\u9fa50-9a-zA-Z]", "", text or "")
+    if not clean:
+        return False
+    return bool(_VISION_INTENT.search(clean))
+
