@@ -146,11 +146,15 @@ class StreamingTurnTests(unittest.IsolatedAsyncioTestCase):
 
         prompt = orch._build_llm_prompt("我要去洗车")
 
-        self.assertEqual(
-            prompt,
-            "<|im_start|>system\n只回答当前问题。<|im_end|>\n"
-            "<|im_start|>user\n我要去洗车<|im_end|>\n<|im_start|>assistant\n",
-        )
+        # Datetime context is prepended; verify structure without hardcoding the timestamp
+        self.assertIn("<|im_start|>system\n", prompt)
+        self.assertIn("只回答当前问题。", prompt)
+        self.assertIn("<|im_end|>\n", prompt)
+        # History must NOT appear (history_max_turns=0)
+        self.assertNotIn("走路还是开车", prompt)
+        self.assertNotIn("你可以骑车", prompt)
+        # User turn must be present
+        self.assertIn("<|im_start|>user\n我要去洗车<|im_end|>\n<|im_start|>assistant\n", prompt)
 
     def test_zero_history_does_not_accumulate_transcript(self) -> None:
         orch = object.__new__(Orchestrator)

@@ -2,7 +2,7 @@
 # Ensure RK1828 is idle enough for VLM (vision+llm). LLM-only / prior VLM leaves memory allocated.
 set -eu
 
-MAX_MB="${P4_MAX_IDLE_MB:-80}"
+MAX_MB="${P4_MAX_IDLE_MB:-1500}"
 
 if ! rknn-smi info 2>&1 | grep -q "Online"; then
   echo "[P4] 1828 未 Online，请先 wait_rknn 或检查 rknn3.service" >&2

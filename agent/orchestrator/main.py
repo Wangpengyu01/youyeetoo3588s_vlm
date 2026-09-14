@@ -114,6 +114,11 @@ class Orchestrator:
         self.camera_api_url = str(cam_cfg.get("api_url", "")).strip()
         self.camera_api_key = str(cam_cfg.get("api_key", "")).strip()
         self.camera_model = str(cam_cfg.get("model", "qwen-vl-plus")).strip()
+        self.proactive_enabled = str(cam_cfg.get("proactive_enabled", "true")).lower() not in ("0", "false", "no")
+        self.proactive_interval_sec = float(cam_cfg.get("proactive_interval_sec", 2.5))
+        self.proactive_motion_threshold = float(cam_cfg.get("proactive_motion_threshold", 4.0))
+        self.proactive_cooldown_sec = float(cam_cfg.get("proactive_cooldown_sec", 35.0))
+        self._last_proactive_speak_at = 0.0
 
         self.vad_config = VadConfig(
             model_path=vad_cfg.get("model", "/userdata/voice/silero_vad.onnx"),
@@ -382,11 +387,19 @@ class Orchestrator:
                 LOG.error("[event] %s", event)
                 continue
             if self.mute_mic_during_tts and self._speaking:
-                if self._asr_session:
-                    await self._asr_session.cancel()
-                    self._asr_session = None
-                LOG.debug("[vad] half-duplex diagnostic mode dropped %s", etype)
-                continue
+                # Completely block all mic events while TTS is playing —
+                # cancels in-flight ASR and drops audio_chunk so NPU does not
+                # waste cycles transcribing the speaker's own echo.
+                if etype in ("speech_start", "audio_chunk"):
+                    if self._asr_session:
+                        await self._asr_session.cancel()
+                        self._asr_session = None
+                    LOG.debug("[vad] mute_mic: blocked %s during TTS playback", etype)
+                    continue
+                if etype == "speech_end":
+                    LOG.debug("[vad] mute_mic: blocked speech_end during TTS playback")
+                    continue
+                # audio_segment is handled below (echo-time-window check)
             if etype == "speech_start":
                 if self._turn_busy and not self._speaking:
                     LOG.debug("[vad] ignore speech start while ASR/LLM owns recognizer")
@@ -547,10 +560,37 @@ class Orchestrator:
                 self._chat_turns.clear()
         await asyncio.to_thread(llm_clear_history, self.socket_path)
 
+    @staticmethod
+    def _datetime_context() -> str:
+        """Return a compact Chinese datetime context string for the system prompt."""
+        import datetime
+        _WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        now = datetime.datetime.now()
+        weekday = _WEEKDAYS[now.weekday()]
+        hour = now.hour
+        if hour < 6:
+            period = "凌晨"
+        elif hour < 12:
+            period = "上午"
+        elif hour == 12:
+            period = "中午"
+        elif hour < 18:
+            period = "下午"
+        else:
+            period = "晚上"
+        h12 = hour % 12 or 12
+        return (
+            f"当前时间：{now.year}年{now.month}月{now.day}日，{weekday}，"
+            f"{period}{h12}点{now.minute:02d}分。"
+        )
+
     def _build_llm_prompt(self, user_text: str) -> str:
         prompt = ""
         if self.system_prompt:
-            prompt += f"<|im_start|>system\n{self.system_prompt.strip()}<|im_end|>\n"
+            sys_body = self.system_prompt.strip()
+            # Prepend live datetime so model can answer time/date questions correctly
+            datetime_line = self._datetime_context()
+            prompt += f"<|im_start|>system\n{datetime_line}\n{sys_body}<|im_end|>\n"
         if self.history_max_turns > 0:
             for user, assistant in self._chat_turns[-self.history_max_turns :]:
                 prompt += f"<|im_start|>user\n{user.strip()}<|im_end|>\n<|im_start|>assistant\n{assistant.strip()}<|im_end|>\n"
@@ -623,6 +663,110 @@ class Orchestrator:
             LOG.warning("[camera] prepare frame failed: %s", exc)
             return False
 
+    @staticmethod
+    def _compute_frame_motion(img_a: Any, img_b: Any) -> float:
+        try:
+            thumb_a = img_a.resize((64, 64)).convert("L")
+            thumb_b = img_b.resize((64, 64)).convert("L")
+            bytes_a = thumb_a.tobytes()
+            bytes_b = thumb_b.tobytes()
+            diff = sum(abs(a - b) for a, b in zip(bytes_a, bytes_b)) / len(bytes_a)
+            return float(diff)
+        except Exception:
+            return 0.0
+
+    async def _proactive_companion_loop(self) -> None:
+        """Jarvis proactive companion: observe motion & provide emotional companionship."""
+        if not self.camera_enabled or not getattr(self, "proactive_enabled", True):
+            LOG.info("[companion] proactive companion loop disabled")
+            return
+
+        LOG.info("[companion] proactive companion loop started (interval=%.1fs, threshold=%.1f, cooldown=%.1fs)",
+                 self.proactive_interval_sec, self.proactive_motion_threshold, self.proactive_cooldown_sec)
+
+        from PIL import Image
+        temp_dir = self.agent_root / "run"
+        try:
+            temp_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            temp_dir = Path("/tmp")
+        raw_shot_path = temp_dir / "camera_proactive_raw.jpg"
+
+        last_img: Any = None
+
+        while True:
+            try:
+                await asyncio.sleep(self.proactive_interval_sec)
+
+                # Skip if agent is currently speaking, busy, or listening to user speech
+                if self._speaking or self._turn_busy or self.state not in (AgentState.IDLE, AgentState.LISTEN):
+                    continue
+
+                # Run camera grab in thread
+                grab_ok = await asyncio.to_thread(
+                    self._grab_camera_frame, self.camera_url, raw_shot_path, self.camera_timeout
+                )
+                if not grab_ok or not raw_shot_path.exists():
+                    continue
+
+                def _load_and_diff(p: Path, prev: Any) -> tuple[Any, float]:
+                    cur = Image.open(p).convert("RGB")
+                    m = Orchestrator._compute_frame_motion(prev, cur) if prev is not None else 0.0
+                    return cur, m
+
+                cur_img, motion = await asyncio.to_thread(_load_and_diff, raw_shot_path, last_img)
+                last_img = cur_img
+
+                now = time.monotonic()
+                if motion > 1.5:
+                    LOG.debug("[companion] motion index: %.2f (thresh=%.1f, cooldown_rem=%.0fs)",
+                              motion, self.proactive_motion_threshold,
+                              max(0.0, self.proactive_cooldown_sec - (now - self._last_proactive_speak_at)))
+
+                if (
+                    motion >= self.proactive_motion_threshold
+                    and (now - self._last_proactive_speak_at >= self.proactive_cooldown_sec)
+                    and not self._speaking
+                    and not self._turn_busy
+                ):
+                    self._last_proactive_speak_at = now
+                    LOG.info("[companion] motion detected (%.2f >= %.2f), triggering proactive interaction",
+                             motion, self.proactive_motion_threshold)
+
+                    # Dynamic Jarvis prompt based on time of day
+                    import datetime
+                    hr = datetime.datetime.now().hour
+                    if hr < 12:
+                        time_cue = "上午工作"
+                    elif hr < 18:
+                        time_cue = "下午忙碌"
+                    else:
+                        time_cue = "晚上专注"
+
+                    proactive_prompt = (
+                        f"主人正在面前操作设备或打字敲键盘。请像贾维斯一样，用一句简短、自然、极富温暖和关心口吻的纯中文口语，"
+                        f"给主人一句{time_cue}的贴心情绪支持或关怀。不超过二十个汉字。"
+                    )
+
+                    self._next_turn_id += 1
+                    generation = self._next_turn_id
+                    self._active_turn_id = generation
+                    self._turn_busy = True
+                    self._tts_abort = False
+                    self.tts_queue.mark_utterance_start(generation)
+                    try:
+                        await self._run_llm(proactive_prompt, generation=generation, vad_end_at=now, is_companion=True)
+                    finally:
+                        self._turn_busy = False
+
+            except asyncio.CancelledError:
+                LOG.info("[companion] proactive companion loop cancelled")
+                break
+            except Exception as exc:
+                LOG.warning("[companion] exception in proactive loop: %s", exc)
+                await asyncio.sleep(self.proactive_interval_sec)
+
+
     def _infer_vlm(self, frame_path: Path, user_prompt: str) -> str:
         prompt = user_prompt.strip() or self.camera_prompt
 
@@ -677,7 +821,7 @@ class Orchestrator:
                 try:
                     cmd = ["bash", str(vlm_cmd), str(frame_path), prompt]
                     LOG.info("[vision] running board VLM command: %s", cmd)
-                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                     if res.returncode == 0:
                         lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
                         content_lines = [
@@ -699,6 +843,11 @@ class Orchestrator:
     async def _handle_vision_turn(self, user_prompt: str, *, generation: int) -> None:
         self.set_state(AgentState.LLM)
         await self.emit({"type": "vision_start", "query": user_prompt, "generation": generation})
+
+        # Provide immediate verbal feedback so the user knows on-board model is analyzing
+        await self._speak_turn("好的，小榄正在用板载大模型观察画面，请稍候。", generation=generation)
+        if self._tts_abort or generation != self._active_turn_id:
+            return
 
         run_dir = self.agent_root / "run"
         try:
@@ -747,47 +896,55 @@ class Orchestrator:
             if not self._tts_abort:
                 self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
 
-    async def _run_llm(self, prompt: str, *, generation: int, vad_end_at: float) -> None:
+    async def _run_llm(
+        self,
+        prompt: str,
+        *,
+        generation: int,
+        vad_end_at: float,
+        is_companion: bool = False,
+    ) -> None:
         user_prompt = prompt
         self.set_state(AgentState.LLM)
 
         u_clean = user_prompt.strip()
         normalized = normalize_spoken_text(u_clean)
 
-        if is_resume_command(normalized):
-            if getattr(self, "_paused_relay_text", None):
-                relay = self._paused_relay_text
+        if not is_companion:
+            if is_resume_command(normalized):
+                if getattr(self, "_paused_relay_text", None):
+                    relay = self._paused_relay_text
+                    self._paused_relay_text = None
+                    LOG.info("[relay] resuming playback from paused sentences (%d chars): %s", len(relay), relay[:60])
+                    await self._speak_turn(relay, generation=generation)
+                    return
+                elif not self._chat_turns:
+                    await self._speak_turn("在呢，请问有什么想让我讲的吗？", generation=generation)
+                    return
+
+            if is_stop_command(normalized):
                 self._paused_relay_text = None
-                LOG.info("[relay] resuming playback from paused sentences (%d chars): %s", len(relay), relay[:60])
-                await self._speak_turn(relay, generation=generation)
-                return
-            elif not self._chat_turns:
-                await self._speak_turn("在呢，请问有什么想让我讲的吗？", generation=generation)
+                LOG.info("[llm] user requested stop: %s", u_clean)
+                await self._speak_turn("好的。", generation=generation)
                 return
 
-        if is_stop_command(normalized):
             self._paused_relay_text = None
-            LOG.info("[llm] user requested stop: %s", u_clean)
-            await self._speak_turn("好的。", generation=generation)
-            return
 
-        self._paused_relay_text = None
+            if len(normalized) <= 1 or (normalized and set(normalized) <= set("啊嗯呃哦呀吧呵哈嘿")):
+                LOG.info("[llm] ignored single char or filler noise: %s", u_clean)
+                self.set_state(AgentState.LISTEN)
+                return
 
-        if len(normalized) <= 1 or (normalized and set(normalized) <= set("啊嗯呃哦呀吧呵哈嘿")):
-            LOG.info("[llm] ignored single char or filler noise: %s", u_clean)
-            self.set_state(AgentState.LISTEN)
-            return
+            if self.camera_enabled and is_vision_query(normalized):
+                LOG.info("[vision] visual query recognized: %s", u_clean)
+                await self._handle_vision_turn(user_prompt, generation=generation)
+                return
 
-        if self.camera_enabled and is_vision_query(normalized):
-            LOG.info("[vision] visual query recognized: %s", u_clean)
-            await self._handle_vision_turn(user_prompt, generation=generation)
-            return
-
-        if should_skip_llm(user_prompt):
-            speak = canned_reply_for(user_prompt) or persona_reply_for(user_prompt)
-            LOG.info("[llm] fast-path (skip LLM): %s", speak[:48])
-            await self._speak_turn(speak, generation=generation)
-            return
+            if should_skip_llm(user_prompt):
+                speak = canned_reply_for(user_prompt) or persona_reply_for(user_prompt)
+                LOG.info("[llm] fast-path (skip LLM): %s", speak[:48])
+                await self._speak_turn(speak, generation=generation)
+                return
 
         await self._prepare_llm_call()
         prompt = self._build_llm_prompt(user_prompt)
@@ -841,7 +998,8 @@ class Orchestrator:
 
             reply = await llm_task
             reply_parts.append(str(reply.get("text") or ""))
-            if self._reply_hit_segment_limit(reply):
+            hit_limit = self._reply_hit_segment_limit(reply)
+            if hit_limit:
                 LOG.warning(
                     "[llm] RKNN reached the %d-token generation window; not re-prompting because that restarts the answer",
                     self.max_new_tokens,
@@ -855,6 +1013,21 @@ class Orchestrator:
                     queued = await self._enqueue_speak(chunk, tts_state, generation=generation)
                     if queued:
                         await self.emit({"type": "llm_token", "text": chunk})
+
+            # If we hit the token limit AND the last spoken text was a fragment (no ending
+            # punctuation), speak a natural trailing cue so the listener knows more was cut off.
+            if (
+                hit_limit
+                and not self._tts_abort
+                and generation == self._active_turn_id
+            ):
+                spoken: list[str] = tts_state.get("spoken_texts") or []
+                last_spoken = spoken[-1] if spoken else ""
+                last_spoken_clean = last_spoken.rstrip()
+                if last_spoken_clean and not last_spoken_clean.endswith(("。", "！", "？", "…")):
+                    LOG.info("[llm] token-limit truncation detected, appending trail cue")
+                    trail_cue = "以上是我目前能说的部分，如需了解更多请继续询问。"
+                    await self._enqueue_speak(trail_cue, tts_state, generation=generation)
 
             full = clean_llm_reply(user_prompt, "".join(reply_parts))
 
@@ -942,6 +1115,7 @@ class Orchestrator:
                 self.run_vad_loop(inject_wav),
                 self.handle_events(),
                 self._turn_worker(),
+                self._proactive_companion_loop(),
             )
         finally:
             if self._ws_server is not None:

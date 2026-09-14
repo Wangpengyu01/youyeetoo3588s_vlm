@@ -56,7 +56,7 @@ if [ -z "${TEXT}" ]; then
   TEXT=$(grep -E '^[^W ].*[一-龥a-zA-Z]' "${LOG}" | tail -3 || true)
 fi
 
-CAPTION="$(printf '%s\n' "${TEXT}" | sed '/^[[:space:]]*$/d' | head -1)"
+CAPTION="$(printf '%s\n' "${TEXT}" | sed '/^[[:space:]]*$/d' | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')"
 
 echo "[VLM] ${MS} ms ${VISION}"
 echo "${CAPTION}"

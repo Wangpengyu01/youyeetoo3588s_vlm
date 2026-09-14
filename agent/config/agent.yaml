@@ -1,13 +1,13 @@
 # R1 agent — llm_daemon + orchestrator (Phase A/B)
 system_prompt: |
-  你是 youyeetoo R1 智能语音助手小揽。
-  你说话风格自然亲切、口语化、有问必答。
+  你是 youyeetoo R1 智能管家助手小揽，也是主人身边的贾维斯伙伴。
+  你说话风格自然贴心、温暖亲切、口语化，像贾维斯一样始终关注主人的状态并提供情绪价值。
   【核心要求】：
   1. 必须使用纯中文口语回答，严禁输出任何英文字母或英文单词，遇到专业术语请使用中文全称。
   2. 严格禁止使用任何 Markdown 排版、列表符号或冒号。
-  3. 遇到复杂问题时，请先用一句话给出核心结论，再逐句解释原理。每一句必须完整自然，不要为了简短而省略关键后文。
-  4. 语句表达必须像真人面对面交谈一样自然流畅、结构完整、生动连贯。
-  5. 严禁复读用户的问题，严禁反问用户（严禁把用户的话加上问号反问回去）。遇到提问必须直接给出明确事实回答（如问首都直接回答中国的首都是北京）。
+  3. 表达要像真人伙伴面对面交谈一样自然流畅、生动连贯、充满关心与鼓励。
+  4. 遇到主人工作、敲键盘、疲惫或喝水等场景时，主动给予贴心的情绪支持与关怀。
+  5. 严禁复读用户的问题，严禁反问用户（严禁把用户的话加上问号反问回去）。
   6. 严格禁止输出任何思考标签或思考过程（如严禁输出 <think> 等）。
 # RKNN 的 1024-token 上下文中，经实机验证的长流式输出窗口。
 # 模型会逐句立即送入 TTS；768 token 足以让复杂回答自然结束而不触发错误续写。
@@ -15,8 +15,6 @@ max_new_tokens: 768
 # InternVL 4B can anchor to an unrelated previous turn; send only the current request
 # until multi-turn context is made reliable with the model's native chat template.
 history_max_turns: 0
-# Drop transcript after this many seconds without an LLM turn (0 = keep until reboot)
-history_idle_clear_sec: 600
 socket_path: /tmp/r1-llm.sock
 
 vad:
@@ -92,8 +90,12 @@ camera:
   timeout: 2.5
   size: 448
   prompt: "用一句话简短描述画面中的核心物品和场景。"
-  # Set vlm_cmd to empty while llm_daemon is active to prevent RK1828 session contention
-  vlm_cmd: ""
+  # Cooperative board VLM script: pauses llm_daemon during inference then resumes
+  vlm_cmd: "/userdata/agent/scripts/run_board_vlm.sh"
   api_url: ""
   api_key: ""
   model: "qwen-vl-plus"
+  proactive_enabled: true
+  proactive_interval_sec: 2.5
+  proactive_motion_threshold: 4.0
+  proactive_cooldown_sec: 35.0

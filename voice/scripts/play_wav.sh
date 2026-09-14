@@ -8,7 +8,7 @@ source /userdata/voice/scripts/voice_env.sh
 
 CONT="${PLAYBACK_CONTINUATION:-0}"
 if [ "${CONT}" != "1" ]; then
-  # Route playback only — do NOT touch mic before aplay (codec switch eats first syllable)
+  # Route playback only 鈥?do NOT touch mic before aplay (codec switch eats first syllable)
   bash /userdata/voice/scripts/speaker_setup.sh >/dev/null
   WARMUP="${PLAYBACK_WARMUP_SEC:-0.12}"
   if awk "BEGIN{exit !(${WARMUP} > 0)}"; then
@@ -16,7 +16,7 @@ if [ "${CONT}" != "1" ]; then
   fi
 fi
 
-PLAY=/tmp/play_16k.wav
+PLAY="/tmp/play_16k_${UID:-0}.wav"
 CHANNELS="${PLAYBACK_CHANNELS:-1}"
 if [ "${PLAYBACK_MONO:-stereo}" = "stereo" ]; then
   CHANNELS=2
@@ -31,13 +31,13 @@ else
   python3 /userdata/voice/scripts/wav_to_16k_mono.py "${WAV}" "${PLAY}" >&2
 fi
 
-echo "[play] ▶ ${WAV} (${MODE:-normal})" >&2
+echo "[play] 鈻?${WAV} (${MODE:-normal})" >&2
 
 APLAY_OPTS=()
 if [ -n "${PLAYBACK_BUFFER_US:-80000}" ]; then
   APLAY_OPTS+=(--buffer-time="${PLAYBACK_BUFFER_US}")
 fi
-# Agent TTS: one continuous play — do not poke amixer during aplay (causes pops).
+# Agent TTS: one continuous play 鈥?do not poke amixer during aplay (causes pops).
 if [ "${PLAYBACK_AGENT_TTS:-0}" = "1" ] || [ "${PLAYBACK_CONTINUATION:-0}" = "1" ]; then
   run_aplay() {
     if ! command -v pasuspender >/dev/null 2>&1; then
@@ -53,7 +53,7 @@ if [ "${PLAYBACK_AGENT_TTS:-0}" = "1" ] || [ "${PLAYBACK_CONTINUATION:-0}" = "1"
   if [ "${VOICE_RESTORE_MIC:-1}" = "1" ]; then
     bash /userdata/voice/scripts/mic_setup.sh >/dev/null 2>&1 || true
   fi
-  echo "[play] 完成" >&2
+  echo "[play] 瀹屾垚" >&2
   exit 0
 fi
 
@@ -102,7 +102,7 @@ if ! run_aplay; then
       if [ "${VOICE_RESTORE_MIC:-1}" = "1" ]; then
         bash /userdata/voice/scripts/mic_setup.sh >/dev/null 2>&1 || true
       fi
-      echo "[play] 完成" >&2
+      echo "[play] 瀹屾垚" >&2
       exit 0
     fi
   fi
@@ -119,4 +119,4 @@ fi
 if [ "${VOICE_RESTORE_MIC:-1}" = "1" ]; then
   bash /userdata/voice/scripts/mic_setup.sh >/dev/null 2>&1 || true
 fi
-echo "[play] 完成" >&2
+echo "[play] 瀹屾垚" >&2

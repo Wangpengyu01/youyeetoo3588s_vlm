@@ -1,8 +1,7 @@
 [Unit]
 Description=R1 voice agent orchestrator (VAD/ASR/TTS)
 After=r1-llm-daemon.service network-online.target sound.target
-Requires=r1-llm-daemon.service
-Wants=network-online.target
+Wants=r1-llm-daemon.service network-online.target
 
 [Service]
 Type=simple
