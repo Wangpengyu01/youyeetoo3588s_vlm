@@ -13,8 +13,8 @@ read_val() {
 # PCM + line-out levels (Output 1/2 max=33 on this codec)
 amixer -c "${CARD}" cset numid=21 192,192 >/dev/null
 amixer -c "${CARD}" sset 'PCM' 192 >/dev/null 2>&1 || true
-amixer -c "${CARD}" cset numid=24 33,33 >/dev/null
-amixer -c "${CARD}" cset numid=25 33,33 >/dev/null
+amixer -c "${CARD}" cset numid=24 16,16 >/dev/null
+amixer -c "${CARD}" cset numid=25 16,16 >/dev/null
 amixer -c "${CARD}" cset numid=38 1 >/dev/null   # Left Mixer Playback
 amixer -c "${CARD}" cset numid=40 1 >/dev/null   # Right Mixer Playback
 

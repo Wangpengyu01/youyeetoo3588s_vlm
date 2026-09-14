@@ -671,30 +671,23 @@ class Orchestrator:
                 cmd = ["bash", str(vlm_cmd), str(frame_path), prompt]
                 LOG.info("[vision] running board VLM command: %s", cmd)
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
-                lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
-                content_lines = [ln for ln in lines if not ln.startswith("[VLM]")]
-                if content_lines:
-                    return content_lines[-1]
+                if res.returncode == 0:
+                    lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
+                    content_lines = [
+                        ln for ln in lines
+                        if not ln.startswith("[VLM]")
+                        and not ln.startswith("[RKNN]")
+                        and not ln.startswith("[P4]")
+                    ]
+                    if content_lines:
+                        return content_lines[-1]
+                else:
+                    LOG.warning("[vision] board VLM command exited with %d: %s", res.returncode, res.stderr or res.stdout)
             except Exception as exc:
                 LOG.warning("[vision] board VLM command failed: %s", exc)
 
-        # 3. Fallback: rule/mock description
-        try:
-            from PIL import Image
-            im = Image.open(frame_path)
-            w, h = im.size
-            gray = im.convert("L")
-            raw_bytes = gray.tobytes()
-            avg_luma = sum(raw_bytes) / len(raw_bytes)
-            if avg_luma < 30:
-                luma_desc = "画面偏暗"
-            elif avg_luma > 200:
-                luma_desc = "画面光线较强"
-            else:
-                luma_desc = "光线良好清晰"
-            return f"网络摄像头画面已正常获取，画面{luma_desc}。"
-        except Exception:
-            return "网络摄像头画面已正常获取。"
+        # 3. Fallback: simple natural confirmation
+        return "好的，已经拍下当前画面了。"
 
     async def _handle_vision_turn(self, user_prompt: str, *, generation: int) -> None:
         self.set_state(AgentState.LLM)

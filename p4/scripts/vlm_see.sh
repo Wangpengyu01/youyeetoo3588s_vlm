@@ -61,6 +61,6 @@ CAPTION="$(printf '%s\n' "${TEXT}" | sed '/^[[:space:]]*$/d' | head -1)"
 echo "[VLM] ${MS} ms ${VISION}"
 echo "${CAPTION}"
 
-if [ -n "${CAPTION}" ]; then
+if [ -n "${CAPTION}" ] && [ "${P4_TTS_STANDALONE:-0}" = "1" ]; then
   bash "${SCRIPTS}/p4_tts.sh" "${CAPTION}" || true
 fi
