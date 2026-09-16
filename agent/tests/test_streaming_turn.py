@@ -211,7 +211,7 @@ class StreamingTurnTests(unittest.IsolatedAsyncioTestCase):
         with patch("orchestrator.main.llm_chat_stream", failing_stream):
             await orch._run_llm("请解释一个复杂问题", generation=8, vad_end_at=time.monotonic())
 
-        self.assertEqual(recovery, [("刚才出了点问题，请再说一遍。", 8)])
+        self.assertEqual(recovery, [("音频信号略有微弱，主人请再说一遍。", 8)])
         self.assertIn({"type": "error", "code": "llm_failed"}, events)
 
     async def test_streaming_turn_hides_thinking_and_enqueues_a_natural_clause(self) -> None:

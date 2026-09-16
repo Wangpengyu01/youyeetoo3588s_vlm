@@ -736,16 +736,22 @@ class Orchestrator:
                     # Dynamic Jarvis prompt based on time of day
                     import datetime
                     hr = datetime.datetime.now().hour
-                    if hr < 12:
-                        time_cue = "上午工作"
+                    if hr < 6:
+                        time_cue = "深夜仍未休息"
+                        style_cue = "像贾维斯一样，用标志性的英伦冷幽默适度调侃睡眠与停机维护的重要性，并极具温度地劝主人保重身体早点休息。"
+                    elif hr < 12:
+                        time_cue = "上午专注投入"
+                        style_cue = "像贾维斯一样，用优雅从容的口吻肯定主人的专注力，并贴心提醒活动肩颈或准备一杯热饮。"
                     elif hr < 18:
-                        time_cue = "下午忙碌"
+                        time_cue = "下午高强度工作"
+                        style_cue = "像贾维斯一样，用沉稳又带点风趣的口吻，提醒适时补充水分并赞许主人的工作节奏。"
                     else:
-                        time_cue = "晚上专注"
+                        time_cue = "晚上持续奋战"
+                        style_cue = "像贾维斯一样，用优雅绅士的语气给予主人坚定的陪伴感与情绪支持，提醒注意劳逸结合。"
 
                     proactive_prompt = (
-                        f"主人正在面前操作设备或打字敲键盘。请像贾维斯一样，用一句简短、自然、极富温暖和关心口吻的纯中文口语，"
-                        f"给主人一句{time_cue}的贴心情绪支持或关怀。不超过二十个汉字。"
+                        f"主人正在面前操作设备或打字敲键盘，当前处于{time_cue}状态。"
+                        f"请{style_cue}用一句极简自然、充满高级感和陪伴感的纯中文口语表达出来。严禁出现英文，不超过二十五个汉字。"
                     )
 
                     self._next_turn_id += 1
@@ -845,7 +851,7 @@ class Orchestrator:
         await self.emit({"type": "vision_start", "query": user_prompt, "generation": generation})
 
         # Provide immediate verbal feedback so the user knows on-board model is analyzing
-        await self._speak_turn("好的，小榄正在用板载大模型观察画面，请稍候。", generation=generation)
+        await self._speak_turn("好的主人，小揽正在观察画面，请稍候。", generation=generation)
         if self._tts_abort or generation != self._active_turn_id:
             return
 
@@ -919,13 +925,13 @@ class Orchestrator:
                     await self._speak_turn(relay, generation=generation)
                     return
                 elif not self._chat_turns:
-                    await self._speak_turn("在呢，请问有什么想让我讲的吗？", generation=generation)
+                    await self._speak_turn("随时待命，主人请吩咐。", generation=generation)
                     return
 
             if is_stop_command(normalized):
                 self._paused_relay_text = None
                 LOG.info("[llm] user requested stop: %s", u_clean)
-                await self._speak_turn("好的。", generation=generation)
+                await self._speak_turn("好的，主人。", generation=generation)
                 return
 
             self._paused_relay_text = None
@@ -1089,7 +1095,7 @@ class Orchestrator:
             await self.emit({"type": "error", "code": "llm_failed"})
             if not self._tts_abort and generation == self._active_turn_id:
                 try:
-                    await self._speak_turn("刚才出了点问题，请再说一遍。", generation=generation)
+                    await self._speak_turn("音频信号略有微弱，主人请再说一遍。", generation=generation)
                 except Exception:
                     LOG.exception("[tts] recovery prompt failed")
         finally:

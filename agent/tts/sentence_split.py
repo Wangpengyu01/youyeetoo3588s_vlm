@@ -271,24 +271,36 @@ def is_echo_reply(user_text: str, reply: str) -> bool:
 _PRESENCE = re.compile(r"^(?:你?在[吗嘛]|人呢|你在[哪哪儿]|在不在|(?:你好|电好|男好|嘿|嗨|喂)?小揽)[呀啊吧呢]?$")
 
 
+_JARVIS_CANNED_REPLIES = (
+    "随时待命，主人。",
+    "我在，主人请吩咐。",
+    "系统运转正常，随时听候调遣，主人。",
+    "小揽一直在，主人请讲。",
+)
+_canned_idx = 0
+
+
 def persona_reply_for(user_text: str) -> str:
     """仅在 LLM 完全无输出或崩溃时的真正兜底。"""
     u = user_text.strip()
     if _STOP.search(u):
-        return "好的。"
+        return "好的，主人。"
     if "首都" in u:
         return "中国的首都是北京。"
     if _PRESENCE.search(u):
-        return "在呢在呢，我一直都在，请问有什么可以帮您的？"
-    return "在呢，请问有什么我可以帮您的吗？"
+        return "随时待命，主人，请吩咐。"
+    return "随时待命，主人请随时吩咐。"
 
 
 def canned_reply_for(user_text: str) -> str | None:
+    global _canned_idx
     u = user_text.strip()
     if _STOP.search(u):
-        return "好的。"
+        return "好的，主人。"
     if _PRESENCE.search(u):
-        return "在呢在呢，我是小揽，随时为您服务！"
+        reply = _JARVIS_CANNED_REPLIES[_canned_idx % len(_JARVIS_CANNED_REPLIES)]
+        _canned_idx += 1
+        return reply
     return None
 
 
