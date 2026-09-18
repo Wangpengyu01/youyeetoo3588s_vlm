@@ -119,6 +119,8 @@ class Orchestrator:
         self.proactive_motion_threshold = float(cam_cfg.get("proactive_motion_threshold", 4.0))
         self.proactive_cooldown_sec = float(cam_cfg.get("proactive_cooldown_sec", 35.0))
         self._last_proactive_speak_at = 0.0
+        self._latest_camera_bytes: bytes | None = None
+        self._latest_camera_time: float = 0.0
 
         self.vad_config = VadConfig(
             model_path=vad_cfg.get("model", "/userdata/voice/silero_vad.onnx"),
@@ -620,12 +622,36 @@ class Orchestrator:
     async def _speak_turn(self, text: str, *, generation: int) -> None:
         await self._speak_extracted(text, canned=True, generation=generation)
 
-    def _grab_camera_frame(self, url: str, save_path: Path, timeout: float = 2.5) -> bool:
+    def _grab_camera_frame(
+        self,
+        url: str,
+        save_path: Path,
+        timeout: float = 2.0,
+        max_cache_age_sec: float = 3.0,
+    ) -> bool:
         try:
+            now = time.monotonic()
+            # 1. Zero-wait in-memory cache hit
+            if (
+                self._latest_camera_bytes
+                and (now - self._latest_camera_time) <= max_cache_age_sec
+            ):
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                save_path.write_bytes(self._latest_camera_bytes)
+                LOG.info(
+                    "[camera] zero-wait: used in-memory frame (age=%.2fs, size=%d bytes)",
+                    now - self._latest_camera_time,
+                    len(self._latest_camera_bytes),
+                )
+                return True
+
             if os.path.exists(url):
                 import shutil
                 save_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(url, save_path)
+                data = save_path.read_bytes()
+                self._latest_camera_bytes = data
+                self._latest_camera_time = now
                 return True
             target_url = url.rstrip("/")
             if not target_url.startswith("file://"):
@@ -639,6 +665,8 @@ class Orchestrator:
                 data = resp.read()
             if not data:
                 return False
+            self._latest_camera_bytes = data
+            self._latest_camera_time = now
             save_path.parent.mkdir(parents=True, exist_ok=True)
             save_path.write_bytes(data)
             return True
@@ -851,9 +879,12 @@ class Orchestrator:
         await self.emit({"type": "vision_start", "query": user_prompt, "generation": generation})
 
         # Provide immediate verbal feedback so the user knows on-board model is analyzing
-        await self._speak_turn("好的主人，小揽正在观察画面，请稍候。", generation=generation)
-        if self._tts_abort or generation != self._active_turn_id:
-            return
+        # If fast cloud/LAN API is configured, skip wait prompt to achieve true second-level latency
+        is_fast_api = bool(self.camera_api_url and self.camera_api_key)
+        if not is_fast_api:
+            await self._speak_turn("好的主人，小揽正在观察画面，请稍候。", generation=generation)
+            if self._tts_abort or generation != self._active_turn_id:
+                return
 
         run_dir = self.agent_root / "run"
         try:

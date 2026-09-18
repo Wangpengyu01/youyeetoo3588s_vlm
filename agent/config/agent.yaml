@@ -89,15 +89,17 @@ api:
 camera:
   enabled: true
   url: "http://10.0.0.159:8080/shot.jpg"
-  timeout: 2.5
+  timeout: 1.8
   size: 448
   prompt: "用一句话简短描述画面中的核心物品和场景。"
   # Cooperative board VLM script: pauses llm_daemon during inference then resumes
   vlm_cmd: "/userdata/agent/scripts/run_board_vlm.sh"
+  # Fast cloud/LAN VLM API (supports OpenAI-compatible endpoints e.g. Qwen-VL, Ollama, vLLM)
+  # When configured, response latency is ~1.0s (skipping board model reload)
   api_url: ""
   api_key: ""
   model: "qwen-vl-plus"
   proactive_enabled: true
-  proactive_interval_sec: 2.5
+  proactive_interval_sec: 1.5
   proactive_motion_threshold: 4.0
   proactive_cooldown_sec: 35.0

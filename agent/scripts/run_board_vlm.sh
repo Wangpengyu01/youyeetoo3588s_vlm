@@ -8,7 +8,12 @@ export P4_MAX_IDLE_MB=1500
 
 # 1. Stop r1-llm-daemon to release RK1828 memory
 sudo systemctl stop r1-llm-daemon 2>/dev/null || true
-sleep 1
+for i in $(seq 1 10); do
+    if ! pgrep -f "llm_daemon" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
 
 # 2. Run board VLM as root
 RESULT=""

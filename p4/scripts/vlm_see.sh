@@ -12,7 +12,13 @@ fi
 bash "${SCRIPTS}/wait_rknn.sh"
 bash "${SCRIPTS}/p4_check_1828.sh"
 
-python3 "${SCRIPTS}/frame_prepare.py" "${SRC}" "${VLM_FRAME}" "${VLM_SIZE}"
+if [ "${SRC}" = "${VLM_FRAME}" ]; then
+  : # already at destination
+elif file "${SRC}" 2>/dev/null | grep -q "${VLM_SIZE}x${VLM_SIZE}"; then
+  cp -f "${SRC}" "${VLM_FRAME}"
+else
+  python3 "${SCRIPTS}/frame_prepare.py" "${SRC}" "${VLM_FRAME}" "${VLM_SIZE}"
+fi
 
 PROMPT="${2:-${VLM_PROMPT}}"
 echo "[VLM] ${PROMPT}" >&2
