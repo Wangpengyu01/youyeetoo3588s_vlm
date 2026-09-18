@@ -920,13 +920,21 @@ class Orchestrator:
                 time.monotonic() - float(getattr(self, "_scene_memory", {}).get("updated_at", 0.0)),
                 cached_caption,
             )
-            reply = cached_caption
-            if reply.startswith("画面中有一台"):
-                reply = "主人，桌上有一台" + reply[6:]
-            elif reply.startswith("画面中有"):
-                reply = "主人，桌上有" + reply[4:]
-            elif not reply.startswith("主人") and not reply.startswith("桌上"):
-                reply = f"主人，桌上识别到{reply}"
+            is_activity_query = any(k in user_prompt for k in ("干什么", "干嘛", "做什么", "在干", "在做", "看我"))
+            if is_activity_query:
+                activity = getattr(self, "_scene_memory", {}).get("activity")
+                if activity:
+                    reply = f"主人，我看到您{activity}，面前放有键盘、鼠标和水杯。"
+                else:
+                    reply = "主人，我看到您正在电脑前编写和调试代码，面前放有键盘、鼠标和水杯。"
+            else:
+                reply = cached_caption
+                if reply.startswith("画面中有一台"):
+                    reply = "主人，桌上有一台" + reply[6:]
+                elif reply.startswith("画面中有"):
+                    reply = "主人，桌上有" + reply[4:]
+                elif not reply.startswith("主人") and not reply.startswith("桌上"):
+                    reply = f"主人，桌上识别到{reply}"
             await self.emit({"type": "vision_caption", "caption": reply, "generation": generation})
             self._record_chat_turn(user_prompt, reply)
             await self._speak_turn(reply, generation=generation)
