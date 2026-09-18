@@ -559,8 +559,10 @@ class Orchestrator:
                     idle,
                     self.history_idle_clear_sec,
                 )
-                self._chat_turns.clear()
-        await asyncio.to_thread(llm_clear_history, self.socket_path)
+        try:
+            await asyncio.to_thread(llm_clear_history, self.socket_path)
+        except Exception as exc:
+            LOG.debug("[llm] clear history skipped: %s", exc)
 
     @staticmethod
     def _datetime_context() -> str:
