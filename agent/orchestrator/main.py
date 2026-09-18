@@ -121,6 +121,8 @@ class Orchestrator:
         self._last_proactive_speak_at = 0.0
         self._latest_camera_bytes: bytes | None = None
         self._latest_camera_time: float = 0.0
+        self._scene_memory_file = self.agent_root / "run" / "scene_memory.json"
+        self._scene_memory: dict[str, Any] = self._load_scene_memory()
 
         self.vad_config = VadConfig(
             model_path=vad_cfg.get("model", "/userdata/voice/silero_vad.onnx"),
@@ -876,9 +878,61 @@ class Orchestrator:
         # 3. Fallback: simple natural confirmation
         return "好的，已经拍下当前画面了。"
 
+    def _load_scene_memory(self) -> dict[str, Any]:
+        try:
+            if hasattr(self, "_scene_memory_file") and self._scene_memory_file.is_file():
+                data = json.loads(self._scene_memory_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("caption"):
+                    LOG.info("[vision] loaded visual scene memory: %s", data.get("caption"))
+                    return data
+        except Exception as exc:
+            LOG.warning("[vision] failed to load visual scene memory: %s", exc)
+        return {}
+
+    def _save_scene_memory(self, caption: str) -> None:
+        try:
+            self._scene_memory = {
+                "caption": caption,
+                "updated_at": time.monotonic(),
+            }
+            if hasattr(self, "_scene_memory_file"):
+                self._scene_memory_file.parent.mkdir(parents=True, exist_ok=True)
+                self._scene_memory_file.write_text(
+                    json.dumps(self._scene_memory, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                LOG.info("[vision] saved visual scene memory: %s", caption)
+        except Exception as exc:
+            LOG.warning("[vision] failed to save visual scene memory: %s", exc)
+
     async def _handle_vision_turn(self, user_prompt: str, *, generation: int) -> None:
         self.set_state(AgentState.LLM)
         await self.emit({"type": "vision_start", "query": user_prompt, "generation": generation})
+
+        # Check if user explicitly asks for a fresh re-scan
+        is_refresh_query = any(k in user_prompt for k in ("重新", "重看", "再看", "刷新", "拍张照", "拍个照"))
+        cached_caption = str(getattr(self, "_scene_memory", {}).get("caption", "")).strip()
+
+        # 1. Zero-wait Visual Scene Memory: if we already have perceived scene, respond in ~0.5s!
+        if cached_caption and not is_refresh_query:
+            LOG.info(
+                "[vision] zero-wait: using visual scene memory (%.2fs old): %s",
+                time.monotonic() - float(getattr(self, "_scene_memory", {}).get("updated_at", 0.0)),
+                cached_caption,
+            )
+            reply = cached_caption
+            if reply.startswith("画面中有一台"):
+                reply = "主人，桌上有一台" + reply[6:]
+            elif reply.startswith("画面中有"):
+                reply = "主人，桌上有" + reply[4:]
+            elif not reply.startswith("主人") and not reply.startswith("桌上"):
+                reply = f"主人，桌上识别到{reply}"
+            await self.emit({"type": "vision_caption", "caption": reply, "generation": generation})
+            self._record_chat_turn(user_prompt, reply)
+            await self._speak_turn(reply, generation=generation)
+            if not self._tts_abort:
+                self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
+            return
 
         # Provide immediate verbal feedback so the user knows on-board model is analyzing
         # If fast cloud/LAN API is configured, skip wait prompt to achieve true second-level latency
@@ -925,6 +979,8 @@ class Orchestrator:
 
         if not caption or caption == "好的，已经拍下当前画面了。":
             caption = "画面中未识别到具体物品。"
+        else:
+            self._save_scene_memory(caption)
 
         LOG.info("[vision] caption ready in %.2fs: %s", time.monotonic() - t0, caption)
         await self.emit({"type": "vision_caption", "caption": caption, "generation": generation})

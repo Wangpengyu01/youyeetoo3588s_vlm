@@ -198,6 +198,51 @@ class VisionTurnTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(vision_called, "Vision pipeline should NOT be called for general knowledge query")
 
+    async def test_vision_turn_zero_wait_scene_memory(self) -> None:
+        orch = object.__new__(Orchestrator)
+        orch.camera_enabled = True
+        orch.camera_url = "http://fake-camera/shot.jpg"
+        orch.camera_timeout = 1.0
+        orch.camera_size = 448
+        orch.camera_prompt = "描述画面"
+        orch.camera_vlm_cmd = "/nonexistent/vlm_see.sh"
+        orch.camera_api_url = ""
+        orch.camera_api_key = ""
+        orch.agent_root = AGENT_ROOT
+        orch._tts_abort = False
+        orch._active_turn_id = 4
+        orch._chat_turns = []
+        orch.history_max_turns = 2
+        orch.listen_cooldown_sec = 0.1
+        orch.state = AgentState.LISTEN
+        orch.set_state = lambda state: setattr(orch, "state", state)
+        orch._scene_memory = {
+            "caption": "画面中有一台笔记本电脑、一部手机和一个水杯。",
+            "updated_at": time.monotonic(),
+        }
+
+        events: list[dict] = []
+        spoken: list[tuple[str, int]] = []
+
+        async def fake_emit(ev: dict) -> None:
+            events.append(ev)
+
+        async def fake_speak(text: str, *, generation: int) -> None:
+            spoken.append((text, generation))
+
+        orch.emit = fake_emit  # type: ignore[method-assign]
+        orch._speak_turn = fake_speak  # type: ignore[method-assign]
+
+        # Should answer instantly in 1 turn WITHOUT "观察画面" waiting audio
+        await orch._run_llm("桌面上有什么", generation=4, vad_end_at=time.monotonic())
+
+        self.assertEqual(len(spoken), 1, "Should immediately answer without waiting audio")
+        self.assertIn("笔记本电脑", spoken[0][0])
+        self.assertEqual(spoken[0][1], 4)
+        event_types = [e["type"] for e in events]
+        self.assertIn("vision_caption", event_types)
+        self.assertEqual(orch._chat_turns[0][1], spoken[0][0])
+
 
 if __name__ == "__main__":
     unittest.main()
