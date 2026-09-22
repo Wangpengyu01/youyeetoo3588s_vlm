@@ -25,6 +25,9 @@ if [[ -f "${PIDFILE}" ]]; then
   rm -f "${PIDFILE}"
 fi
 
+# Clean up any stale temp tts files from prior runs
+rm -f /tmp/agent_tts_*.wav /tmp/tts_out*.wav 2>/dev/null || true
+
 # Orphan from manual runs / crash (pidfile missing but process or port still held)
 if pgrep -f "orchestrator.main" >/dev/null 2>&1; then
   echo "[start] stopping orphan orchestrator.main"

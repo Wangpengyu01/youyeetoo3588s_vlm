@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +91,26 @@ class TtsQueue:
         LOG.info("[tts] interrupted, saved %d clauses for relay", len(pending))
         return pending
 
+    def abort(self) -> None:
+        """Synchronously request abort and discard pending queues."""
+        self._interrupted.set()
+        while not self._wav_q.empty():
+            try:
+                self._wav_q.get_nowait()
+                self._wav_q.task_done()
+            except Exception:
+                break
+        while not self._text_q.empty():
+            try:
+                self._text_q.get_nowait()
+                self._text_q.task_done()
+            except Exception:
+                break
+        try:
+            self.engine.stop_playback()
+        except Exception:
+            pass
+
     async def start(self) -> None:
         if self._synth_task is None:
             self._synth_task = asyncio.create_task(self._synth_worker())
@@ -165,8 +186,14 @@ class TtsQueue:
                     return
                 if self._interrupted.is_set() or item.generation != self._active_generation:
                     continue
-                path = Path(f"/tmp/agent_tts_{self._slot}.wav")
+                pid = os.getpid()
+                path = Path(f"/tmp/agent_tts_{pid}_{self._slot}.wav")
                 self._slot += 1
+                if path.is_file():
+                    try:
+                        path.unlink(missing_ok=True)
+                    except Exception:
+                        path = Path(f"/tmp/agent_tts_{pid}_{time.monotonic_ns()}_{self._slot}.wav")
                 t0 = time.monotonic()
                 wav = await asyncio.to_thread(self.engine.synthesize, item.text, str(path))
                 if self._interrupted.is_set() or item.generation != self._active_generation:
@@ -210,6 +237,11 @@ class TtsQueue:
                     if self._current_speaking_generation == item.generation:
                         self._current_speaking_chunk = None
                         self._current_speaking_generation = None
+                    try:
+                        if item.wav and item.wav.is_file() and str(item.wav).startswith("/tmp/agent_tts_"):
+                            item.wav.unlink(missing_ok=True)
+                    except Exception:
+                        pass
                 if self._utterance_gain is None and gain is not None:
                     self._utterance_gain = gain
                 if self._interrupted.is_set():

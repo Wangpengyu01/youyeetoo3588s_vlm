@@ -70,6 +70,7 @@ do_start() {
   echo -e "${COLOR_RESET}"
 
   mkdir -p "${AGENT_ROOT}/run" "${AGENT_ROOT}/logs"
+  rm -f /tmp/agent_tts_*.wav /tmp/tts_out*.wav 2>/dev/null || true
 
   # 1. Start LLM daemon if binary exists
   if [[ -x "${AGENT_ROOT}/bin/llm_daemon" ]]; then

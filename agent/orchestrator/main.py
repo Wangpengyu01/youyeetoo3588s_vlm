@@ -910,18 +910,34 @@ class Orchestrator:
         elif mtype in ("get_status", "status", "ping"):
             await self._broadcast_status()
         elif mtype in ("stop", "abort", "tts_abort"):
-            self._tts_abort = True
-            self.tts_queue.abort()
+            await self._abort_tts_playback()
             self.set_state(AgentState.LISTEN)
+
+    async def _abort_tts_playback(self) -> None:
+        self._tts_abort = True
+        if hasattr(self, "tts_queue") and self.tts_queue is not None:
+            if hasattr(self.tts_queue, "abort"):
+                try:
+                    res = self.tts_queue.abort()
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    pass
+            elif hasattr(self.tts_queue, "interrupt"):
+                try:
+                    await self.tts_queue.interrupt()
+                except Exception:
+                    pass
 
     async def _handle_direct_chat(self, text: str) -> None:
         self._next_turn_id += 1
         generation = self._next_turn_id
         self._active_turn_id = generation
         self._turn_busy = True
+        await self._abort_tts_playback()
         self._tts_abort = False
-        self.tts_queue.abort()
-        self.tts_queue.mark_utterance_start(generation)
+        if hasattr(self.tts_queue, "mark_utterance_start"):
+            self.tts_queue.mark_utterance_start(generation)
         try:
             clean_text = normalize_user_text(text)
             if clean_text:
