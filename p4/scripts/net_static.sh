@@ -24,7 +24,7 @@ ip -br addr show eth0
 echo "[NET] 路由:"
 ip route | grep -E 'default|192.168.2' || true
 
-CAM_IP=$(echo "${RTSP_URL}" | sed -E 's|rtsp://([^:/]+).*|\1|')
+CAM_IP=$(echo "${RTSP_URL}" | sed -E 's|^rtsp://([^@/]+@)?([^:/]+).*|\2|')
 echo "[NET] ping 摄像机 ${CAM_IP} ..."
 ping -c 2 -W 2 "${CAM_IP}" || {
   echo "[NET] 警告: 摄像机 ping 不通，请确认网线/网段/网关" >&2

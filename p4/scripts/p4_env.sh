@@ -4,12 +4,22 @@
 export P4_ROOT="${P4_ROOT:-/userdata/p4}"
 export SCRIPTS="${P4_ROOT}/scripts"
 
+_RTSP_ENV="${P4_ROOT}/config/rtsp.env"
+if [ -f "${_RTSP_ENV}" ]; then
+  # shellcheck disable=SC1090
+  set -a
+  source "${_RTSP_ENV}"
+  set +a
+fi
+
 # Network (R1 eth0)
 export STATIC_IP="${STATIC_IP:-192.168.2.100}"
 export STATIC_PREFIX="${STATIC_PREFIX:-24}"
 export STATIC_GW="${STATIC_GW:-192.168.2.1}"
 export STATIC_DNS="${STATIC_DNS:-192.168.2.1 8.8.8.8}"
-export NM_CONN="${NM_CONN:-Wired connection 1}"
+export P4_ETH_IF="${P4_ETH_IF:-eth0}"
+export P4_NM_CONN="${P4_NM_CONN:-p4-camera-eth}"
+export NM_CONN="${NM_CONN:-${P4_NM_CONN}}"
 
 # RTSP camera
 export RTSP_URL="${RTSP_URL:-rtsp://192.168.2.169:554/stream_2}"

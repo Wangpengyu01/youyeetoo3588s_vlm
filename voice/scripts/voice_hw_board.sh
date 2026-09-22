@@ -9,7 +9,7 @@
 
 export MIC_ROUTE=main_board
 export MIC_SOURCE=main
-export PLAYBACK_ROUTE=headphone
+export PLAYBACK_ROUTE=both
 export PLAYBACK_MONO=stereo
 export PLAYBACK_CHANNELS=2
 

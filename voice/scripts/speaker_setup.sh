@@ -2,6 +2,7 @@
 # Playback routing for R1 ES8388.
 # PLAYBACK_ROUTE=headphone  → 3.5mm 孔（外接 USB 供电音响）
 # PLAYBACK_ROUTE=onboard    → 板载无源喇叭（左声道）
+# PLAYBACK_ROUTE=both       → J368 四 pin 喇叭 + 耳机孔同时输出
 CARD="${1:-0}"
 ROUTE="${PLAYBACK_ROUTE:-headphone}"
 
@@ -26,6 +27,21 @@ case "${ROUTE}" in
     [ "${cur_spk}" != "on" ] && amixer -c "${CARD}" cset numid=29 1 >/dev/null
     [ "${cur_hp}" != "off" ] && amixer -c "${CARD}" cset numid=28 0 >/dev/null
     echo "[SPK] 板载喇叭 Mono(Left)" >&2
+    ;;
+  both|dual|j368)
+    MONO="${PLAYBACK_MONO:-stereo}"
+    case "${MONO}" in
+      left)  want_mono=1 ;;
+      right) want_mono=2 ;;
+      *)     want_mono=0 ;;
+    esac
+    cur_mono=$(read_val 35)
+    cur_hp=$(read_val 28)
+    cur_spk=$(read_val 29)
+    [ "${cur_mono}" != "${want_mono}" ] && amixer -c "${CARD}" cset numid=35 "${want_mono}" >/dev/null
+    [ "${cur_hp}" != "on" ] && amixer -c "${CARD}" cset numid=28 1 >/dev/null
+    [ "${cur_spk}" != "off" ] && amixer -c "${CARD}" cset numid=29 1 >/dev/null
+    echo "[SPK] J368+Headphone both · MonoMux=${MONO}" >&2
     ;;
   headphone|hp|jack|*)
     MONO="${PLAYBACK_MONO:-stereo}"

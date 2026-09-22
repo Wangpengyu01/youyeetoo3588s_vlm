@@ -15,14 +15,23 @@ R1（3588）硬解 RTSP → InternVL3.5-4B（1828）一句话描述。
 ## PC 推送
 
 ```powershell
-adb push "C:\Users\wwff\Documents\youyeetoo3588s\p4" /userdata/
-adb shell "chmod +x /userdata/p4/scripts/*.sh /userdata/p4/scripts/*.py"
+cd p4
+.\push_p4.ps1
 ```
+
+（脚本会把 `.sh` / `.env` 转为 LF，并推到 `/userdata/p4/`。）
 
 ## 板端
 
 ```bash
-# 1) 设静态 IP + ping 摄像机
+# 0) 一次性：NM 持久静态 IP（推荐，重启后仍有效）
+sudo bash /userdata/p4/scripts/install_eth_static_persistent.sh
+sudo cp /userdata/agent/systemd/r1-p4-eth.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now r1-p4-eth.service
+
+# 可选：复制 config/rtsp.env.example → config/rtsp.env 并填入账号密码
+
+# 1) 临时改 IP（旧方式，会改 NM_CONN 连接）
 bash /userdata/p4/scripts/net_static.sh
 
 # 2) 探测 RTSP 编码

@@ -51,7 +51,7 @@ wait_ui_ready() {
     if python3 - <<PY 2>/dev/null
 import urllib.request
 html = urllib.request.urlopen("http://127.0.0.1:${PORT}/", timeout=1).read().decode("utf-8", "replace")
-raise SystemExit(0 if "语音助手" in html else 1)
+raise SystemExit(0 if ("边缘多模态" in html or "语音助手" in html) else 1)
 PY
     then
       log "UI HTTP ready"

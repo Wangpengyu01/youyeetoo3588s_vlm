@@ -26,7 +26,7 @@ class TtsConfig:
     sid: int = 0
     speed: float = 1.0
     max_chars: int = 80
-    out_wav: str = "/tmp/agent_tts_out.wav"
+    out_wav: str = "/userdata/agent/run/tts/agent_tts_out.wav"
 
 
 class TtsEngine:
@@ -74,6 +74,7 @@ class TtsEngine:
             LOG.info("[tts] truncated to %d chars", self.cfg.max_chars)
 
         out = Path(out_path or self.cfg.out_wav)
+        out.parent.mkdir(parents=True, exist_ok=True)
         if self._native is not None:
             return self._native.synthesize_to_wav(text, out)  # type: ignore[union-attr]
 

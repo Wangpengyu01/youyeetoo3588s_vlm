@@ -8,7 +8,7 @@ $Board = "/userdata/agent"
 
 Write-Host "[push] $Root\agent -> $Board"
 
-adb shell "mkdir -p $Board/bin $Board/scripts $Board/config $Board/logs $Board/run $Board/asr $Board/orchestrator $Board/ui $Board/systemd"
+adb shell "mkdir -p $Board/bin $Board/scripts $Board/config $Board/logs $Board/run/tts $Board/asr $Board/orchestrator $Board/ui $Board/systemd"
 
 function Push-Lf($Local, $Remote) {
     $content = [System.IO.File]::ReadAllText($Local).Replace("`r`n", "`n")

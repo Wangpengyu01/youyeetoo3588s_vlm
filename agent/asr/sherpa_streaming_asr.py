@@ -188,7 +188,9 @@ class StreamingParaformerRecognizer:
         L.SherpaOnnxDestroyOnlineRecognizerResult.restype = None
 
     def reset(self) -> None:
-        self._lib.SherpaOnnxOnlineStreamReset(self._recognizer, self._stream)
+        if self._stream:
+            self._lib.SherpaOnnxDestroyOnlineStream(self._stream)
+        self._stream = self._lib.SherpaOnnxCreateOnlineStream(self._recognizer)
 
     def _decode_loop(self) -> str:
         while self._lib.SherpaOnnxIsOnlineStreamReady(self._recognizer, self._stream):

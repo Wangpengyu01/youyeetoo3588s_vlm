@@ -21,6 +21,9 @@ chmod +x "${AGENT_ROOT}/scripts/display_hdmi_only.sh" 2>/dev/null || true
 # systemd units
 install -m 644 "${AGENT_ROOT}/systemd/r1-llm-daemon.service" /etc/systemd/system/
 install -m 644 "${AGENT_ROOT}/systemd/r1-orchestrator.service" /etc/systemd/system/
+if [[ -f "${AGENT_ROOT}/systemd/r1-p4-eth.service" ]]; then
+  install -m 644 "${AGENT_ROOT}/systemd/r1-p4-eth.service" /etc/systemd/system/
+fi
 systemctl daemon-reload
 
 # Stop manual/orphan processes before enabling services
@@ -29,6 +32,10 @@ pkill -f "/userdata/agent/bin/llm_daemon" 2>/dev/null || true
 rm -f "${AGENT_ROOT}/run/orchestrator.pid" "${AGENT_ROOT}/run/llm_daemon.pid" /tmp/r1-llm.sock
 sleep 1
 
+if systemctl list-unit-files r1-p4-eth.service >/dev/null 2>&1; then
+  systemctl enable r1-p4-eth.service
+  systemctl start r1-p4-eth.service || true
+fi
 systemctl enable r1-llm-daemon.service r1-orchestrator.service
 systemctl restart r1-llm-daemon.service || true
 echo "[install] waiting for llm socket (up to 120s)..."

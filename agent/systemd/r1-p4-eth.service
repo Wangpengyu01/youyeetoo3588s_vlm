@@ -1,0 +1,14 @@
+[Unit]
+Description=P4 camera eth0 static route (NetworkManager p4-camera-eth)
+After=NetworkManager.service
+Before=network-online.target r1-orchestrator.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /userdata/p4/scripts/boot_eth_static.sh
+TimeoutStartSec=25
+
+[Install]
+WantedBy=multi-user.target

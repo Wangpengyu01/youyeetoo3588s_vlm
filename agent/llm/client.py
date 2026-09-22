@@ -56,6 +56,7 @@ def _read_chat_stream(
                         "text": "".join(tokens),
                         "ttft_s": ttft,
                         "elapsed_s": time.time() - t0,
+                        "finish_reason": msg.get("finish_reason"),
                         "usage": usage,
                     }
                 elif mtype == "error":
@@ -74,6 +75,7 @@ def _read_chat_stream(
         "text": text,
         "ttft_s": ttft,
         "elapsed_s": time.time() - t0,
+        "finish_reason": None,
         "usage": usage,
     }
 

@@ -1,6 +1,7 @@
 # Secrets
 .env
 .env.*
+p4/config/rtsp.env
 *.pem
 *.key
 credentials.json

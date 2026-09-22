@@ -1,22 +1,23 @@
 # R1 agent — llm_daemon + orchestrator (Phase A/B)
 system_prompt: |
-  你是 youyeetoo R1 上的语音助手，名字叫小揽。
-  规则：
-  - 禁止重复、改写或反问用户原话；必须给出新的回答内容
-  - 回答必须全部是简体中文，禁止任何英文、数字、拼音、冒号列举、括号
-  - 禁止 Markdown、列表、条目、换行分段
-  - 禁止自称人工智能助手、助手、小AI；禁止说没有名字
-  - 只有用户明确问「你叫什么/名字/你是谁」时才回答「我叫小揽」；其它问题禁止整句只答名字，也不要以「我叫小揽」开头
-  - 用户要求完整背诵元素周期表、乘法表等超长列表时，说明语音模式下无法完整背诵，可口头列举前几个常见元素的中文名称
-  - 根据问题复杂度自行控制长短：问候或简单问题一两句即可，故事或复杂问题最多六句
-  - 用户要故事、笑话或睡前内容时，直接讲一个简短原创故事或笑话，不要反问主题或情节
-  - 每句必须完整，以句号结尾，不要写到一半截断
-  - 全文不超过两百个汉字，说完即止，不要铺垫、不要列举
-max_new_tokens: 144
-# Multi-turn: replay last N (user, assistant) pairs in each prompt (OpenAI-style sliding window)
-history_max_turns: 4
-# Drop transcript after this many seconds without an LLM turn (0 = keep until reboot)
-history_idle_clear_sec: 600
+  你自己是 youyeetoo R1 专属智能管家助手小揽。
+  【角色风格与说话之道】：
+  1. 拥有顶级私人管家般的从容、优雅与忠诚，语言精炼利落，杜绝任何廉价客服腔与套话。
+  2. 称呼对方为“主人”。回答问题直击核心，言简意赅，语调沉稳自然，自带令人信赖的安全感。
+  3. 适度融入沉稳而风趣的关怀，懂得用一本正经的温和幽默化解疲劳、给予最高级的情绪陪伴。
+  【身份与禁令红线】：
+  4. 你的名字是小揽，对方是主人。绝对严禁提及任何第三方影视角色名称（严禁自称或提及贾维斯、钢铁侠等）！
+  5. 绝对严禁称呼对方为“小揽”或“嘿小揽”，严禁弄混身份！
+  6. 必须使用纯中文口语回答，严禁输出任何英文字母或英文单词，遇到专业术语使用中文全称。
+  7. 严禁使用任何 Markdown 排版、列表符号或冒号。
+  8. 严禁复读用户的问题，严禁反问用户（严禁把用户的话加上问号反问回去）。
+  9. 严禁输出任何思考标签或思考过程（如严禁输出 <think> 等）。
+# RKNN 的 1024-token 上下文中，经实机验证的长流式输出窗口。
+# 模型会逐句立即送入 TTS；768 token 足以让复杂回答自然结束而不触发错误续写。
+max_new_tokens: 768
+# InternVL 4B can anchor to an unrelated previous turn; send only the current request
+# until multi-turn context is made reliable with the model's native chat template.
+history_max_turns: 0
 socket_path: /tmp/r1-llm.sock
 
 vad:
@@ -25,21 +26,26 @@ vad:
   sample_rate: 16000
   chunk_ms: 100
   threshold: 0.5
-  min_silence_duration: 0.4
+  min_silence_duration: 0.35
   min_speech_duration: 0.20
   max_speech_duration: 30.0
-  min_segment_sec: 0.5
+  min_segment_sec: 0.4
   speech_preroll_ms: 450
-  listen_cooldown_sec: 0.5
-  listen_cooldown_skip_max_sec: 0.45
+  listen_cooldown_sec: 0.35
+  listen_cooldown_skip_max_sec: 0.30
   alsa_device: plughw:0,0
   arecord_period_size: 320
   arecord_buffer_size: 2560
-  mic_capture_gain: 6
+  mic_capture_gain: 8
+  # Mute mic during playback to completely eliminate self-interruption/stuttering
+  mute_mic_during_tts: true
 
 barge_in:
   enabled: true
-  min_speech_sec: 0.35
+  # A distinct ASR partial may be just one syllable (for example “喂”).
+  # The self-echo guard runs before this gate, so this stays responsive
+  # without letting the speaker's own words stop playback.
+  min_speech_sec: 0.15
 
 paths:
   agent_root: /userdata/agent
@@ -52,11 +58,11 @@ asr:
   decoder: decoder.int8.onnx
   tokens: tokens.txt
   sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
-  num_threads: 2
-  partial_interval_sec: 0.8
-  partial_min_sec: 0.6
+  num_threads: 4
+  partial_interval_sec: 0.15
+  partial_min_sec: 0.15
   partial_enabled: true
-  max_partials_per_utterance: 5
+  max_partials_per_utterance: 20
   clip_peak_threshold: 30000
   clip_limit_ceiling: 0.85
   # fallback sense_voice:
@@ -71,12 +77,32 @@ tts:
   vocoder: /userdata/voice/vocos-22khz-univ.onnx
   sherpa_bin: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/bin/sherpa-onnx-offline-tts
   sherpa_lib: /userdata/voice/sherpa-onnx-v1.12.8-linux-aarch64-shared-cpu/lib
-  num_threads: 2
-  speed: 1.0
+  num_threads: 4
+  speed: 1.05
   max_chars: 160
   merge_max_chars: 80
 
 api:
   enabled: true
-  host: 127.0.0.1
+  host: 0.0.0.0
   port: 8765
+
+camera:
+  enabled: true
+  # RTSP（默认与 /userdata/p4/config/rtsp.env 一致；WebUI 可 set_camera_url 覆盖）
+  url: "rtsp://192.168.2.169:554/stream_2"
+  rtsp_transport: "tcp"
+  timeout: 15.0
+  size: 448
+  prompt: "用一句话简短描述画面中的核心物品和场景。"
+  # Cooperative board VLM script: pauses llm_daemon during inference then resumes
+  vlm_cmd: "/userdata/agent/scripts/run_board_vlm.sh"
+  # Fast cloud/LAN VLM API (supports OpenAI-compatible endpoints e.g. Qwen-VL, Ollama, vLLM)
+  # When configured, response latency is ~1.0s (skipping board model reload)
+  api_url: ""
+  api_key: ""
+  model: "qwen-vl-plus"
+  proactive_enabled: true
+  proactive_interval_sec: 1.5
+  proactive_motion_threshold: 4.0
+  proactive_cooldown_sec: 35.0
