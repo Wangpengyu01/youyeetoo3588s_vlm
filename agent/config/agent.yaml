@@ -84,13 +84,18 @@ tts:
 
 api:
   enabled: true
-  host: 127.0.0.1
+  host: 0.0.0.0
   port: 8765
 
 camera:
   enabled: true
+  # 视频流/摄像头地址：
+  # 1) RTSP 视频流（支持安防摄像头/NVR，支持 TCP 与 RK3588 MPP 硬件加速）：
+  # url: "rtsp://192.168.2.169:554/stream_2"
+  # 2) HTTP 快照流（手机 IP Webcam 或 Web 推流）：
   url: "http://10.0.0.159:8080/shot.jpg"
-  timeout: 1.8
+  rtsp_transport: "tcp"
+  timeout: 2.0
   size: 448
   prompt: "用一句话简短描述画面中的核心物品和场景。"
   # Cooperative board VLM script: pauses llm_daemon during inference then resumes

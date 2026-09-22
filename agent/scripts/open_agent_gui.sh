@@ -75,7 +75,7 @@ start_http() {
     fi
     rm -f "${PIDFILE}"
   fi
-  nohup python3 -m http.server "${PORT}" --bind 127.0.0.1 --directory "${UI_DIR}" >>"${LOG}" 2>&1 &
+  nohup python3 -m http.server "${PORT}" --bind 0.0.0.0 --directory "${UI_DIR}" >>"${LOG}" 2>&1 &
   echo $! >"${PIDFILE}"
   wait_ui_ready
 }

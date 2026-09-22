@@ -100,13 +100,14 @@ class Orchestrator:
 
         self.event_bus = EventBus()
         self.api_enabled = str(api_cfg.get("enabled", "true")).lower() not in ("0", "false", "no")
-        self.api_host = str(api_cfg.get("host", "127.0.0.1"))
+        self.api_host = str(api_cfg.get("host", "0.0.0.0"))
         self.api_port = int(api_cfg.get("port", 8765))
         self.barge_in_enabled = str(barge_cfg.get("enabled", "true")).lower() not in ("0", "false", "no")
         self.barge_in_min_sec = float(barge_cfg.get("min_speech_sec", 0.35))
 
         self.camera_enabled = str(cam_cfg.get("enabled", "true")).lower() not in ("0", "false", "no")
         self.camera_url = str(cam_cfg.get("url", "http://10.0.0.159:8080/shot.jpg"))
+        self.camera_rtsp_transport = str(cam_cfg.get("rtsp_transport", "tcp")).strip()
         self.camera_timeout = float(cam_cfg.get("timeout", 2.5))
         self.camera_size = int(cam_cfg.get("size", 448))
         self.camera_prompt = str(cam_cfg.get("prompt", "用一句话简短描述画面中的核心物品和场景。"))
@@ -626,6 +627,78 @@ class Orchestrator:
     async def _speak_turn(self, text: str, *, generation: int) -> None:
         await self._speak_extracted(text, canned=True, generation=generation)
 
+    def _grab_rtsp_frame(self, url: str, save_path: Path, timeout: float = 3.0) -> bool:
+        """Capture one frame from an RTSP stream using GStreamer (MPP hardware decode) or FFmpeg."""
+        tmp_path = save_path.with_suffix(".rtsp_tmp.jpg")
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+        transport = getattr(self, "camera_rtsp_transport", "tcp") or "tcp"
+        size = getattr(self, "camera_size", 448)
+
+        # 1. Try GStreamer with RK3588 MPP hardware decoder (fastest, ~100ms)
+        try:
+            gst_mpp_cmd = [
+                "gst-launch-1.0", "-e",
+                "rtspsrc", f"location={url}", f"protocols={transport}", "latency=200", "drop-on-latency=true", "!",
+                "rtph264depay", "!", "h264parse", "!", "mppvideodec", "!",
+                "videoconvert", "!", "videoscale", "!",
+                f"video/x-raw,width={size},height={size}", "!",
+                "jpegenc", "quality=90", "!",
+                "filesink", f"location={tmp_path}", "sync=false", "async=false",
+            ]
+            subprocess.run(gst_mpp_cmd, capture_output=True, timeout=timeout)
+            if tmp_path.is_file() and tmp_path.stat().st_size > 1000:
+                tmp_path.replace(save_path)
+                return True
+        except Exception:
+            pass
+
+        # 2. Try GStreamer generic decodebin (h265 or software decode)
+        try:
+            gst_gen_cmd = [
+                "gst-launch-1.0", "-e",
+                "rtspsrc", f"location={url}", f"protocols={transport}", "latency=200", "drop-on-latency=true", "!",
+                "decodebin", "!", "videoconvert", "!", "videoscale", "!",
+                f"video/x-raw,width={size},height={size}", "!",
+                "jpegenc", "quality=90", "!",
+                "filesink", f"location={tmp_path}", "sync=false", "async=false",
+            ]
+            subprocess.run(gst_gen_cmd, capture_output=True, timeout=timeout)
+            if tmp_path.is_file() and tmp_path.stat().st_size > 1000:
+                tmp_path.replace(save_path)
+                return True
+        except Exception:
+            pass
+
+        # 3. Try FFmpeg (cross-platform, Linux and Windows)
+        try:
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", "-rtsp_transport", transport,
+                "-i", url, "-vframes", "1", "-q:v", "2",
+                "-s", f"{size}x{size}",
+                str(tmp_path),
+            ]
+            subprocess.run(ffmpeg_cmd, capture_output=True, timeout=timeout)
+            if tmp_path.is_file() and tmp_path.stat().st_size > 1000:
+                tmp_path.replace(save_path)
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _sync_ui_preview_frame(self, data: bytes) -> None:
+        try:
+            ui_frame_path = self.agent_root / "ui" / "latest_frame.jpg"
+            ui_frame_path.parent.mkdir(parents=True, exist_ok=True)
+            ui_frame_path.write_bytes(data)
+        except Exception:
+            pass
+
     def _grab_camera_frame(
         self,
         url: str,
@@ -647,32 +720,40 @@ class Orchestrator:
                     now - self._latest_camera_time,
                     len(self._latest_camera_bytes),
                 )
+                self._sync_ui_preview_frame(self._latest_camera_bytes)
                 return True
 
-            if os.path.exists(url):
+            data: bytes | None = None
+            if url.startswith("rtsp://"):
+                ok = self._grab_rtsp_frame(url, save_path, timeout=timeout)
+                if ok and save_path.is_file():
+                    data = save_path.read_bytes()
+            elif os.path.exists(url):
                 import shutil
                 save_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(url, save_path)
                 data = save_path.read_bytes()
-                self._latest_camera_bytes = data
-                self._latest_camera_time = now
-                return True
-            target_url = url.rstrip("/")
-            if not target_url.startswith("file://"):
-                if not target_url.endswith(".jpg") and not target_url.endswith(".jpeg"):
-                    target_url += "/shot.jpg"
-            req = urllib.request.Request(
-                target_url,
-                headers={"User-Agent": "XiaoLan-CameraClient/1.0"},
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = resp.read()
+            else:
+                target_url = url.rstrip("/")
+                if not target_url.startswith("file://"):
+                    if not target_url.endswith(".jpg") and not target_url.endswith(".jpeg"):
+                        target_url += "/shot.jpg"
+                req = urllib.request.Request(
+                    target_url,
+                    headers={"User-Agent": "XiaoLan-CameraClient/1.0"},
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = resp.read()
+                if data:
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    save_path.write_bytes(data)
+
             if not data:
                 return False
+
             self._latest_camera_bytes = data
             self._latest_camera_time = now
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            save_path.write_bytes(data)
+            self._sync_ui_preview_frame(data)
             return True
         except Exception as exc:
             LOG.warning("[camera] grab frame from %s failed: %s", url, exc)
@@ -748,6 +829,7 @@ class Orchestrator:
 
                 cur_img, motion = await asyncio.to_thread(_load_and_diff, raw_shot_path, last_img)
                 last_img = cur_img
+                await self.emit({"type": "camera_frame", "motion": round(motion, 2), "timestamp": time.time()})
 
                 now = time.monotonic()
                 if motion > 1.5:
@@ -804,6 +886,107 @@ class Orchestrator:
                 LOG.warning("[companion] exception in proactive loop: %s", exc)
                 await asyncio.sleep(self.proactive_interval_sec)
 
+    async def _handle_ws_message(self, raw_msg: str) -> None:
+        try:
+            data = json.loads(raw_msg)
+        except Exception:
+            return
+        mtype = str(data.get("type", "")).strip().lower()
+        if mtype in ("chat", "user_message"):
+            text = str(data.get("text", "")).strip()
+            if text:
+                asyncio.create_task(self._handle_direct_chat(text))
+        elif mtype in ("snap", "capture"):
+            prompt = str(data.get("prompt", "桌面上有什么？")).strip()
+            asyncio.create_task(self._handle_manual_snap(user_prompt=prompt))
+        elif mtype in ("set_camera_url", "update_camera"):
+            url = str(data.get("url", "")).strip()
+            if url:
+                self.camera_url = url
+                if "transport" in data:
+                    self.camera_rtsp_transport = str(data.get("transport", "tcp")).strip()
+                LOG.info("[ws] camera URL updated to %s (transport=%s)", self.camera_url, self.camera_rtsp_transport)
+                asyncio.create_task(self._test_camera_connection())
+        elif mtype in ("get_status", "status", "ping"):
+            await self._broadcast_status()
+        elif mtype in ("stop", "abort", "tts_abort"):
+            self._tts_abort = True
+            self.tts_queue.abort()
+            self.set_state(AgentState.LISTEN)
+
+    async def _handle_direct_chat(self, text: str) -> None:
+        self._next_turn_id += 1
+        generation = self._next_turn_id
+        self._active_turn_id = generation
+        self._turn_busy = True
+        self._tts_abort = False
+        self.tts_queue.abort()
+        self.tts_queue.mark_utterance_start(generation)
+        try:
+            clean_text = normalize_user_text(text)
+            if clean_text:
+                await self.emit({"type": "asr_final", "text": clean_text, "generation": generation, "source": "web"})
+                await self._run_llm(clean_text, generation=generation, vad_end_at=time.monotonic())
+        finally:
+            self._turn_busy = False
+            self.set_state(AgentState.LISTEN)
+
+    async def _handle_manual_snap(self, user_prompt: str = "桌面上有什么？") -> None:
+        run_dir = self.agent_root / "run"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            run_dir = Path("/tmp")
+        raw_shot_path = run_dir / "camera_shot.jpg"
+        vlm_frame_path = run_dir / "latest_vlm.jpg"
+
+        def _do_grab_and_infer() -> tuple[bool, str]:
+            ok = self._grab_camera_frame(self.camera_url, raw_shot_path, timeout=self.camera_timeout, max_cache_age_sec=0.0)
+            if not ok:
+                return False, ""
+            prep_ok = self._prepare_vlm_frame(raw_shot_path, vlm_frame_path, size=self.camera_size)
+            if not prep_ok:
+                return False, ""
+            caption = self._infer_vlm(vlm_frame_path, user_prompt)
+            return True, caption
+
+        await self.emit({"type": "vision_start", "query": user_prompt, "generation": 0})
+        success, caption = await asyncio.to_thread(_do_grab_and_infer)
+        if success and caption:
+            self._save_scene_memory(caption)
+            await self.emit({"type": "vision_caption", "caption": caption, "generation": 0, "url": "/latest_frame.jpg"})
+        else:
+            await self.emit({"type": "vision_error", "error": "camera_unreachable", "generation": 0})
+
+    async def _test_camera_connection(self) -> None:
+        run_dir = self.agent_root / "run"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            run_dir = Path("/tmp")
+        raw_shot_path = run_dir / "camera_test.jpg"
+        ok = await asyncio.to_thread(
+            self._grab_camera_frame, self.camera_url, raw_shot_path, self.camera_timeout, 0.0
+        )
+        await self.emit({
+            "type": "camera_status",
+            "url": self.camera_url,
+            "transport": self.camera_rtsp_transport,
+            "connected": ok,
+        })
+
+    async def _broadcast_status(self) -> None:
+        preview_exists = (self.agent_root / "ui" / "latest_frame.jpg").is_file()
+        await self.emit({
+            "type": "status_response",
+            "state": self.state.value if hasattr(self.state, "value") else str(self.state),
+            "camera_url": self.camera_url,
+            "camera_transport": self.camera_rtsp_transport,
+            "scene_memory": getattr(self, "_scene_memory", {}),
+            "preview_exists": preview_exists,
+            "asr_backend": getattr(getattr(self, "asr_engine", None), "config", None) and getattr(self.asr_engine.config, "backend", "sense_voice") or "sense_voice",
+            "llm_backend": getattr(getattr(self, "llm_engine", None), "backend", "rknn"),
+        })
 
     def _infer_vlm(self, frame_path: Path, user_prompt: str) -> str:
         prompt = user_prompt.strip() or self.camera_prompt
@@ -889,11 +1072,19 @@ class Orchestrator:
             LOG.warning("[vision] failed to load visual scene memory: %s", exc)
         return {}
 
-    def _save_scene_memory(self, caption: str) -> None:
+    def _save_scene_memory(self, caption: str, activity: str = "") -> None:
         try:
+            tags: list[str] = []
+            for kw in ("电脑", "笔记本", "显示器", "屏幕", "键盘", "鼠标", "水杯", "手机", "书籍", "耳机", "咖啡", "平板"):
+                if kw in caption and kw not in tags:
+                    tags.append(kw)
+            import datetime
             self._scene_memory = {
                 "caption": caption,
+                "activity": activity or ("正在电脑前专注工作" if any(k in caption for k in ("电脑", "屏幕", "键盘")) else "室内活动"),
+                "tags": tags or ["桌面物品"],
                 "updated_at": time.monotonic(),
+                "time_str": datetime.datetime.now().strftime("%H:%M:%S"),
             }
             if hasattr(self, "_scene_memory_file"):
                 self._scene_memory_file.parent.mkdir(parents=True, exist_ok=True)
@@ -902,6 +1093,11 @@ class Orchestrator:
                     encoding="utf-8",
                 )
                 LOG.info("[vision] saved visual scene memory: %s", caption)
+            if hasattr(self, "event_bus") and hasattr(self, "_loop") and self._loop and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self.emit({"type": "scene_memory", "memory": self._scene_memory}),
+                    self._loop,
+                )
         except Exception as exc:
             LOG.warning("[vision] failed to save visual scene memory: %s", exc)
 
@@ -1208,7 +1404,12 @@ class Orchestrator:
         try:
             if self.api_enabled:
                 try:
-                    self._ws_server = await run_ws_server(self.event_bus, self.api_host, self.api_port)
+                    self._ws_server = await run_ws_server(
+                        self.event_bus,
+                        self.api_host,
+                        self.api_port,
+                        on_message=self._handle_ws_message,
+                    )
                 except OSError as exc:
                     LOG.warning(
                         "[api] WebSocket bind failed (%s) — voice pipeline continues without WS",

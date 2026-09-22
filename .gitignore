@@ -68,6 +68,7 @@ voice/rknn3_session_test.cpp
 *.wav
 /tmp/
 *.log
+agent/run/
 
 # Cursor canvas runtime (source *.canvas.tsx is tracked under canvases/)
 *.canvas.data.json
