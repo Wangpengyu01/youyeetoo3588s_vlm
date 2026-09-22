@@ -41,6 +41,9 @@ cp ~/youyeetoo3588s_vlm/agent/daemon/llm_daemon.cpp \
 # 追加目标示例
 llm_daemon: src/llm_daemon.cpp src/Tokenizer.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o llm_daemon $^ $(LDFLAGS) $(LIBS)
+
+vlm_daemon: src/vlm_daemon.cpp src/Tokenizer.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o vlm_daemon $^ $(LDFLAGS) $(LIBS)
 ```
 
 若不想改 Makefile，Docker 内手动编译（路径按 SDK 调整）：
@@ -70,6 +73,32 @@ make llm_daemon
 
 file llm_daemon
 # 期望: ELF 64-bit LSB executable, ARM aarch64
+```
+
+### vlm_daemon（P5b M1）
+
+与 `llm_daemon` **相同编译 flags**，源文件换为 `src/vlm_daemon.cpp`（从仓库 `agent/daemon/vlm_daemon.cpp` 拷贝到 SDK demo 的 `src/`）：
+
+```bash
+make vlm_daemon
+# 或 g++ … -o vlm_daemon src/vlm_daemon.cpp src/Tokenizer.cpp …
+adb push vlm_daemon /userdata/agent/bin/vlm_daemon
+adb shell chmod +x /userdata/agent/bin/vlm_daemon
+```
+
+**板端测试（无需先替换 systemd）：**
+
+```bash
+# Shell CLI（推荐，配合现有 llm_daemon）：
+bash /userdata/agent/scripts/vlm_shell_cli.sh
+
+# 编好的 vlm_daemon 交互（释放 1828 → vlm_see → 再 load LLM）：
+/userdata/agent/bin/vlm_daemon --cli \
+  /userdata/models/InternVL3_5-4B/llm_InternVL3_5-4B.rknn \
+  /userdata/models/InternVL3_5-4B/llm_InternVL3_5-4B.weight \
+  /userdata/models/InternVL3_5-4B/InternVL3_5-4B.tokenizer.gguf \
+  /userdata/models/InternVL3_5-4B/InternVL3_5-4B.embed.bin \
+  1024 64 0xff
 ```
 
 ## 5. 推到板端

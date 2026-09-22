@@ -33,8 +33,8 @@ export VLM_SIZE="${VLM_SIZE:-448}"
 export VLM_FPS="${VLM_FPS:-1}"
 export VLM_PROMPT="${VLM_PROMPT:-用一句话描述当前画面。}"
 
-export LATEST_FRAME="${LATEST_FRAME:-/tmp/rtsp_latest.jpg}"
-export VLM_FRAME="${VLM_FRAME:-/tmp/vlm_frame.jpg}"
+export LATEST_FRAME="${LATEST_FRAME:-/userdata/agent/run/rtsp_latest.jpg}"
+export VLM_FRAME="${VLM_FRAME:-/userdata/agent/run/vlm_frame.jpg}"
 export RTSP_CODEC="${RTSP_CODEC:-h264}"
 
 export VLM_DEMO="${VLM_DEMO:-/userdata/rknn_InternVLM_demo}"

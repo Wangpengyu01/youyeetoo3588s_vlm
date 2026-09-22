@@ -6,14 +6,9 @@ PROMPT="${2:-请用一句话详细描述画面中看到的物品}"
 
 export P4_MAX_IDLE_MB=1500
 
-# 1. Stop r1-llm-daemon to release RK1828 memory
-sudo systemctl stop r1-llm-daemon 2>/dev/null || true
-for i in $(seq 1 10); do
-    if ! pgrep -f "llm_daemon" >/dev/null 2>&1; then
-        break
-    fi
-    sleep 0.05
-done
+# 1. Stop llm_daemon cooperatively (avoid D-state systemctl on RK3588)
+AGENT_ROOT="${AGENT_ROOT:-/userdata/agent}"
+bash "${AGENT_ROOT}/scripts/cooperative_stop_llm.sh" || true
 
 # 2. Run board VLM as root
 RESULT=""
@@ -21,8 +16,8 @@ if [ -f "/userdata/p4/scripts/vlm_see.sh" ]; then
     RESULT=$(sudo P4_MAX_IDLE_MB=1500 bash /userdata/p4/scripts/vlm_see.sh "${IMAGE}" "${PROMPT}" 2>/tmp/vlm_err.log || true)
 fi
 
-# 3. Restart r1-llm-daemon asynchronously (no blocking)
-sudo systemctl start --no-block r1-llm-daemon 2>/dev/null || true
+# 3. Restart llm_daemon (wait for socket in background-friendly way)
+bash "${AGENT_ROOT}/scripts/cooperative_start_llm.sh" /tmp/r1-llm.sock 90 &
 
 # 4. Extract clean caption
 CLEAN_CAPTION=$(echo "${RESULT}" | grep -v '^\[' | sed '/^[[:space:]]*$/d' | tail -1)

@@ -1,5 +1,5 @@
-// llm_daemon — InternVL3.5-4B LLM-only persistent service (Ollama-style)
-// Fork baseline: voice/src/rknn3_session_test.cpp · RKNN3 1.0.5b10
+// vlm_daemon — P5b M1: LLM session + JSONL socket; --cli for shell UX; see via vlm_cli_see.sh bridge until six-tuple in-process (M2).
+// Fork baseline: agent/daemon/llm_daemon.cpp · RKNN3 1.0.5b10
 
 #include "Tokenizer.h"
 #include "float16.h"
@@ -23,7 +23,8 @@
 #include <vector>
 
 #define LOGW(fmt, ...) fprintf(stderr, "\033[33m" fmt "\033[0m", ##__VA_ARGS__)
-#define DEFAULT_SOCK "/tmp/r1-llm.sock"
+#define DEFAULT_SOCK "/tmp/r1-vlm.sock"
+#define VLM_CLI_SEE "/userdata/agent/scripts/vlm_cli_see.sh"
 
 static rknn3_context g_ctx = 0;
 static rknn3_session *g_session = nullptr;
@@ -44,6 +45,13 @@ static bool g_first_decode = true;
 static pthread_mutex_t g_infer_mu = PTHREAD_MUTEX_INITIALIZER;
 static char g_sock_path[108] = DEFAULT_SOCK;
 static volatile sig_atomic_t g_stop = 0;
+static bool g_cli_stdout = false;
+static std::string g_path_model;
+static std::string g_path_weight;
+static std::string g_path_tok;
+static std::string g_path_embed;
+static int32_t g_max_ctx = 1024;
+static uint32_t g_core_mask = 0xff;
 
 static void json_escape_append(const char *s, std::string &out)
 {
@@ -181,7 +189,10 @@ static int result_callback(void *userdata, RKLLMResult *result, LLMCallState sta
 
   if (state == RKLLM_RUN_ERROR)
   {
-    send_error(fd, g_req_id.c_str(), "inference error");
+    if (fd >= 0)
+      send_error(fd, g_req_id.c_str(), "inference error");
+    else
+      fprintf(stderr, "\n[cli] inference error\n");
     return 0;
   }
   if (state == RKLLM_RUN_NORMAL)
@@ -198,12 +209,20 @@ static int result_callback(void *userdata, RKLLMResult *result, LLMCallState sta
       g_first_decode = false;
     }
 
-    std::string line = "{\"type\":\"token\",\"id\":\"";
-    line += g_req_id;
-    line += "\",\"text\":\"";
-    json_escape_append(piece.c_str(), line);
-    line += "\"}";
-    send_line(fd, line);
+    if (g_cli_stdout)
+    {
+      fputs(piece.c_str(), stdout);
+      fflush(stdout);
+    }
+    else
+    {
+      std::string line = "{\"type\":\"token\",\"id\":\"";
+      line += g_req_id;
+      line += "\",\"text\":\"";
+      json_escape_append(piece.c_str(), line);
+      line += "\"}";
+      send_line(fd, line);
+    }
   }
   return 0;
 }
@@ -416,6 +435,165 @@ static bool handle_chat(int fd, const std::string &line)
   return true;
 }
 
+static void teardown_session()
+{
+  if (g_session)
+  {
+    rknn3_session_destroy(g_session);
+    g_session = nullptr;
+  }
+  if (g_ctx)
+  {
+    rknn3_destroy(g_ctx);
+    g_ctx = 0;
+  }
+  if (g_embed.embedding_data && g_embed.mmap_size)
+  {
+    munmap(g_embed.embedding_data, g_embed.mmap_size);
+    g_embed.embedding_data = nullptr;
+    g_embed.mmap_size = 0;
+  }
+  if (g_embed.fd != -1)
+  {
+    close(g_embed.fd);
+    g_embed.fd = -1;
+  }
+  if (g_tokenizer)
+  {
+    delete g_tokenizer;
+    g_tokenizer = nullptr;
+  }
+}
+
+static bool vision_intent(const std::string &line)
+{
+  if (line.find("查看") != std::string::npos &&
+      (line.find("画面") != std::string::npos || line.find("当前") != std::string::npos))
+    return true;
+  if (line.find("描述") != std::string::npos && line.find("画面") != std::string::npos)
+    return true;
+  if (line.find("看看") != std::string::npos || line.find("看一下") != std::string::npos ||
+      line.find("看图") != std::string::npos)
+    return true;
+  return false;
+}
+
+static int run_external_see(const std::string &prompt)
+{
+  setenv("VLM_SEE_PROMPT", prompt.c_str(), 1);
+  std::string cmd = "bash ";
+  cmd += VLM_CLI_SEE;
+  cmd += " 2>/userdata/agent/logs/vlm_daemon_see.err";
+  fprintf(stderr, "[vlm_daemon] release 1828 → external see…\n");
+  pthread_mutex_lock(&g_infer_mu);
+  teardown_session();
+  pthread_mutex_unlock(&g_infer_mu);
+  int rc = system(cmd.c_str());
+  if (init_daemon(g_path_model.c_str(), g_path_weight.c_str(), g_path_tok.c_str(), g_path_embed.c_str(),
+                  g_max_ctx, g_core_mask) != 0)
+  {
+    fprintf(stderr, "[vlm_daemon] re-init after see failed\n");
+    return -1;
+  }
+  fprintf(stderr, "[vlm_daemon] LLM session restored\n");
+  return rc;
+}
+
+static bool handle_see(int fd, const std::string &line)
+{
+  std::string prompt;
+  if (!json_get_string(line, "prompt", prompt) || prompt.empty())
+    prompt = "用一句话描述当前画面。";
+  std::string req_id;
+  if (!json_get_string(line, "id", req_id))
+    req_id = "see";
+  std::string image_path;
+  json_get_string(line, "image_path", image_path);
+
+  (void)image_path;
+  pthread_mutex_lock(&g_infer_mu);
+  g_client_fd = fd;
+  g_req_id = req_id;
+  g_cli_stdout = false;
+  pthread_mutex_unlock(&g_infer_mu);
+
+  gettimeofday(&g_start, NULL);
+  int rc = run_external_see(prompt);
+  gettimeofday(&g_end, NULL);
+  g_client_fd = -1;
+
+  if (rc != 0)
+  {
+    send_error(fd, req_id.c_str(), "see pipeline failed (vlm_cli_see.sh)");
+    return false;
+  }
+  char done[256];
+  snprintf(done, sizeof(done), "{\"type\":\"done\",\"id\":\"%s\",\"usage\":{\"see_ms\":0}}", req_id.c_str());
+  send_line(fd, done);
+  return true;
+}
+
+static void cli_loop()
+{
+  fprintf(stderr, "[vlm_daemon] interactive CLI (vision → %s)\n", VLM_CLI_SEE);
+  fputs("小揽> ", stdout);
+  fflush(stdout);
+  char buf[4096];
+  while (!g_stop && fgets(buf, sizeof(buf), stdin))
+  {
+    std::string line(buf);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+      line.pop_back();
+    if (line.empty())
+    {
+      fputs("小揽> ", stdout);
+      fflush(stdout);
+      continue;
+    }
+    if (line == "quit" || line == "exit" || line == "/quit")
+      break;
+
+    if (vision_intent(line))
+    {
+      fputs("\n", stdout);
+      run_external_see(line);
+      fputs("\n小揽> ", stdout);
+      fflush(stdout);
+      continue;
+    }
+
+    int fake_fd = -1;
+    pthread_mutex_lock(&g_infer_mu);
+    g_client_fd = fake_fd;
+    g_req_id = "cli";
+    g_cli_stdout = true;
+    g_first_decode = true;
+    gettimeofday(&g_start, NULL);
+
+    rknn3_llm_infer_param infer_param = {.keep_history = 1, .max_new_tokens = 64};
+    rknn3_llm_input inputs[1];
+    rknn3_llm_tensor tensor = {.name = NULL,
+                               .prompt = line.c_str(),
+                               .embed = NULL,
+                               .tokens = NULL,
+                               .n_tokens = 0,
+                               .enable_thinking = false};
+    rknn3_llm_input input = {.input_type = RKNN3_LLM_INPUT_PROMPT, .llm_input = tensor};
+    inputs[0] = input;
+    int ret = rknn3_session_run(g_session, inputs, 1, &infer_param);
+    g_cli_stdout = false;
+    g_client_fd = -1;
+    pthread_mutex_unlock(&g_infer_mu);
+
+    if (ret != RKNN3_SUCCESS)
+      fprintf(stderr, "\n[cli] inference failed\n");
+    else
+      fputs("\n", stdout);
+    fputs("小揽> ", stdout);
+    fflush(stdout);
+  }
+}
+
 static void handle_request(int fd, const std::string &line)
 {
   if (line.find("\"type\":\"ping\"") != std::string::npos || line.find("\"type\": \"ping\"") != std::string::npos)
@@ -434,6 +612,11 @@ static void handle_request(int fd, const std::string &line)
   if (line.find("\"type\":\"chat\"") != std::string::npos || line.find("\"type\": \"chat\"") != std::string::npos)
   {
     handle_chat(fd, line);
+    return;
+  }
+  if (line.find("\"type\":\"see\"") != std::string::npos || line.find("\"type\": \"see\"") != std::string::npos)
+  {
+    handle_see(fd, line);
     return;
   }
   send_error(fd, "", "unknown request type");
@@ -510,37 +693,49 @@ static int serve_forever()
 
 int main(int argc, char **argv)
 {
-  if (argc < 8)
+  bool cli_mode = false;
+  int base = 1;
+  if (argc >= 2 && strcmp(argv[1], "--cli") == 0)
   {
-    LOGW("Usage: %s <rknn> <weight> <tokenizer.gguf> <embed.bin> <ctx> <default_max_new> <core_mask> [sock_path]\n",
+    cli_mode = true;
+    base = 2;
+  }
+  if (argc < base + 7)
+  {
+    LOGW("Usage: %s [--cli] <rknn> <weight> <tokenizer.gguf> <embed.bin> <ctx> <default_max_new> <core_mask> [sock_path]\n",
          argv[0]);
+    LOGW("  --cli: stdin shell (vision phrases → %s)\n", VLM_CLI_SEE);
     return 1;
   }
 
   signal(SIGINT, on_signal);
   signal(SIGTERM, on_signal);
-  if (argc >= 9)
-    strncpy(g_sock_path, argv[8], sizeof(g_sock_path) - 1);
+  if (argc >= base + 8)
+    strncpy(g_sock_path, argv[base + 7], sizeof(g_sock_path) - 1);
 
-  if (init_daemon(argv[1], argv[2], argv[3], argv[4], atoi(argv[5]),
-                  (uint32_t)strtoul(argv[7], NULL, 16)) != 0)
+  g_path_model = argv[base + 0];
+  g_path_weight = argv[base + 1];
+  g_path_tok = argv[base + 2];
+  g_path_embed = argv[base + 3];
+  g_max_ctx = atoi(argv[base + 4]);
+  g_core_mask = (uint32_t)strtoul(argv[base + 6], NULL, 16);
+
+  if (init_daemon(g_path_model.c_str(), g_path_weight.c_str(), g_path_tok.c_str(), g_path_embed.c_str(), g_max_ctx,
+                  g_core_mask) != 0)
   {
-    fprintf(stderr, "[daemon] init failed\n");
+    fprintf(stderr, "[vlm_daemon] init failed\n");
     return 1;
   }
 
-  int rc = serve_forever();
+  int rc = 0;
+  if (cli_mode)
+    cli_loop();
+  else
+    rc = serve_forever();
 
-  if (g_session)
-    rknn3_session_destroy(g_session);
-  if (g_ctx)
-    rknn3_destroy(g_ctx);
-  if (g_embed.embedding_data && g_embed.mmap_size)
-    munmap(g_embed.embedding_data, g_embed.mmap_size);
-  if (g_embed.fd != -1)
-    close(g_embed.fd);
-  if (g_tokenizer)
-    delete g_tokenizer;
+  pthread_mutex_lock(&g_infer_mu);
+  teardown_session();
+  pthread_mutex_unlock(&g_infer_mu);
 
   return rc;
 }
