@@ -23,6 +23,15 @@ fi
 PROMPT="${2:-${VLM_PROMPT}}"
 echo "[VLM] ${PROMPT}" >&2
 
+if [ ! -d "${VLM_DEMO}" ] || [ ! -x "${VLM_DEMO}/rknn_internvl3_demo" ]; then
+  echo "[VLM] 错误: 未找到 InternVL 执行程序 (${VLM_DEMO}/rknn_internvl3_demo)" >&2
+  echo "[VLM] 板卡缺少 /userdata/rknn_InternVLM_demo 目录！" >&2
+  echo "[VLM] 解决方式: 从电脑推送至板端:" >&2
+  echo "    adb push rknn_InternVLM_demo /userdata/" >&2
+  echo "    adb shell chmod +x /userdata/rknn_InternVLM_demo/rknn_internvl3_demo" >&2
+  exit 1
+fi
+
 export LD_LIBRARY_PATH="${VLM_LD_LIBRARY_PATH}"
 cd "${VLM_DEMO}"
 
@@ -67,6 +76,6 @@ CAPTION="$(printf '%s\n' "${TEXT}" | sed '/^[[:space:]]*$/d' | tr '\n' ' ' | sed
 echo "[VLM] ${MS} ms ${VISION}"
 echo "${CAPTION}"
 
-if [ -n "${CAPTION}" ] && [ "${P4_TTS_STANDALONE:-0}" = "1" ]; then
+if [ -n "${CAPTION}" ] && [ "${P4_TTS:-1}" = "1" ]; then
   bash "${SCRIPTS}/p4_tts.sh" "${CAPTION}" || true
 fi

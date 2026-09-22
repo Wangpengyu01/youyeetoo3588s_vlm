@@ -27,10 +27,19 @@ export LATEST_FRAME="${LATEST_FRAME:-/tmp/rtsp_latest.jpg}"
 export VLM_FRAME="${VLM_FRAME:-/tmp/vlm_frame.jpg}"
 export RTSP_CODEC="${RTSP_CODEC:-h264}"
 
+# Auto-detect VLM_DEMO path
+if [ -z "${VLM_DEMO:-}" ] || [ ! -d "${VLM_DEMO}" ]; then
+  for cand in /userdata/rknn_InternVLM_demo /userdata/agent/rknn_InternVLM_demo "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)/rknn_InternVLM_demo"; do
+    if [ -d "${cand}" ]; then
+      VLM_DEMO="${cand}"
+      break
+    fi
+  done
+fi
 export VLM_DEMO="${VLM_DEMO:-/userdata/rknn_InternVLM_demo}"
 export VLM_BIN="${VLM_DEMO}/rknn_internvl3_demo"
 export VLM_MODEL="${VLM_MODEL:-/userdata/models/InternVL3_5-4B}"
-export VLM_LD_LIBRARY_PATH="${VLM_DEMO}/lib:/usr/lib"
+export VLM_LD_LIBRARY_PATH="${VLM_DEMO}/lib:${VLM_DEMO}:/usr/lib:/usr/local/lib"
 
 # TTS after caption (3588 CPU; uses frozen voice_hw_board.sh)
 export P4_TTS="${P4_TTS:-1}"
