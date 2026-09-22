@@ -10,7 +10,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _AGENT_ROOT = Path(__file__).resolve().parent.parent
 if str(_AGENT_ROOT) not in sys.path:
@@ -206,6 +206,17 @@ class Orchestrator:
         )
 
         self.socket_path = cfg.get("socket_path", "/tmp/r1-llm.sock")
+        from xiaolan_cli.brain import XiaolanBrain
+
+        infer_cfg = cfg.get("inference") or {}
+        backend = str(infer_cfg.get("backend", "llm_daemon"))
+        self.brain = XiaolanBrain(
+            self.agent_root,
+            socket_path=self.socket_path,
+            max_new_tokens=int(cfg.get("max_new_tokens", 128)),
+            backend=backend,
+        )
+        self.inference_backend = backend
         self.max_new_tokens = int(cfg.get("max_new_tokens", 64))
         self.history_max_turns = int(cfg.get("history_max_turns", 4))
         self.history_idle_clear_sec = float(cfg.get("history_idle_clear_sec", 600))
@@ -683,9 +694,19 @@ class Orchestrator:
 
             data: bytes | None = None
             if url.startswith("rtsp://"):
-                ok = self._grab_rtsp_frame(url, save_path, timeout=timeout)
-                if ok and save_path.is_file():
-                    data = save_path.read_bytes()
+                ok = False
+                try:
+                    self.brain.grab_frame(save_path, rtsp_url=url)
+                    if save_path.is_file() and save_path.stat().st_size > 1000:
+                        ok = True
+                        data = save_path.read_bytes()
+                        LOG.info("[camera] grab_camera_frame ok (%d bytes)", len(data))
+                except Exception as exc:
+                    LOG.warning("[camera] grab_camera_frame failed: %s", exc)
+                if not ok:
+                    ok = self._grab_rtsp_frame(url, save_path, timeout=timeout)
+                    if ok and save_path.is_file():
+                        data = save_path.read_bytes()
             elif os.path.exists(url):
                 import shutil
                 save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -900,7 +921,11 @@ class Orchestrator:
             clean_text = normalize_user_text(text)
             if clean_text:
                 await self.emit({"type": "asr_final", "text": clean_text, "generation": generation, "source": "web"})
-                await self._run_llm(clean_text, generation=generation, vad_end_at=time.monotonic())
+                if self.camera_enabled and self.brain.wants_vision(clean_text):
+                    LOG.info("[web] vision intent: %s", clean_text[:48])
+                    await self._handle_vision_turn(clean_text, generation=generation)
+                else:
+                    await self._run_llm(clean_text, generation=generation, vad_end_at=time.monotonic())
         finally:
             self._turn_busy = False
             self.set_state(AgentState.LISTEN)
@@ -914,18 +939,24 @@ class Orchestrator:
         raw_shot_path = run_dir / "camera_shot.jpg"
         vlm_frame_path = run_dir / "latest_vlm.jpg"
 
-        def _do_grab_and_infer() -> tuple[bool, str]:
-            ok = self._grab_camera_frame(self.camera_url, raw_shot_path, timeout=self.camera_timeout, max_cache_age_sec=0.0)
-            if not ok:
-                return False, ""
-            prep_ok = self._prepare_vlm_frame(raw_shot_path, vlm_frame_path, size=self.camera_size)
-            if not prep_ok:
-                return False, ""
-            caption = self._infer_vlm(vlm_frame_path, user_prompt)
-            return True, caption
-
         await self.emit({"type": "vision_start", "query": user_prompt, "generation": 0})
-        success, caption = await asyncio.to_thread(_do_grab_and_infer)
+        ok = await asyncio.to_thread(
+            self._grab_camera_frame,
+            self.camera_url,
+            raw_shot_path,
+            self.camera_timeout,
+            0.0,
+        )
+        success, caption = False, ""
+        if ok:
+            prep_ok = await asyncio.to_thread(
+                self._prepare_vlm_frame, raw_shot_path, vlm_frame_path, self.camera_size
+            )
+            if prep_ok:
+                caption = await self._board_vlm_with_web_tokens(
+                    vlm_frame_path, user_prompt, generation=0
+                )
+                success = True
         if success and caption:
             self._save_scene_memory(caption)
             await self.emit({"type": "vision_caption", "caption": caption, "generation": 0, "url": "/latest_frame.jpg"})
@@ -951,6 +982,11 @@ class Orchestrator:
 
     async def _broadcast_status(self) -> None:
         preview_exists = (self.agent_root / "ui" / "latest_frame.jpg").is_file()
+        vlm_ready = await asyncio.to_thread(self.ping_llm_daemon)
+        asr_backend = "sense_voice"
+        cfg = getattr(getattr(self, "asr_engine", None), "config", None)
+        if cfg is not None:
+            asr_backend = getattr(cfg, "backend", asr_backend)
         await self.emit({
             "type": "status_response",
             "state": self.state.value if hasattr(self.state, "value") else str(self.state),
@@ -958,11 +994,53 @@ class Orchestrator:
             "camera_transport": self.camera_rtsp_transport,
             "scene_memory": getattr(self, "_scene_memory", {}),
             "preview_exists": preview_exists,
-            "asr_backend": getattr(getattr(self, "asr_engine", None), "config", None) and getattr(self.asr_engine.config, "backend", "sense_voice") or "sense_voice",
-            "llm_backend": getattr(getattr(self, "llm_engine", None), "backend", "rknn"),
+            "asr_backend": asr_backend,
+            "inference_backend": self.inference_backend,
+            "llm_socket": self.socket_path,
+            "vlm_daemon_ready": vlm_ready,
+            "llm_backend": self.inference_backend,
         })
 
-    def _infer_vlm(self, frame_path: Path, user_prompt: str) -> str:
+    async def _board_vlm_with_web_tokens(
+        self,
+        frame_path: Path,
+        prompt: str,
+        *,
+        generation: int,
+    ) -> str:
+        """Run board VLM; stream see tokens to WebUI when using P5b vlm_daemon."""
+        loop = asyncio.get_running_loop()
+        token_queue: asyncio.Queue[str] = asyncio.Queue()
+        stream_tokens = self.inference_backend == "vlm_daemon"
+
+        def on_token(piece: str) -> None:
+            loop.call_soon_threadsafe(token_queue.put_nowait, piece)
+
+        infer_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._infer_vlm,
+                frame_path,
+                prompt,
+                on_token if stream_tokens else None,
+            )
+        )
+        if stream_tokens:
+            while not infer_task.done() or not token_queue.empty():
+                try:
+                    piece = await asyncio.wait_for(token_queue.get(), timeout=0.04)
+                except asyncio.TimeoutError:
+                    continue
+                if generation and generation != self._active_turn_id:
+                    continue
+                await self.emit({"type": "llm_token", "text": piece, "generation": generation})
+        return await infer_task
+
+    def _infer_vlm(
+        self,
+        frame_path: Path,
+        user_prompt: str,
+        on_token: Callable[[str], None] | None = None,
+    ) -> str:
         prompt = user_prompt.strip() or self.camera_prompt
 
         # 1. Cloud VLM API if configured
@@ -1007,30 +1085,17 @@ class Orchestrator:
             except Exception as exc:
                 LOG.warning("[vision] cloud VLM call failed: %s", exc)
 
-        # 2. Board RKNN VLM script if available
-        if self.camera_vlm_cmd:
-            vlm_cmd = Path(self.camera_vlm_cmd)
-            if not vlm_cmd.is_absolute():
-                vlm_cmd = self.agent_root / vlm_cmd
-            if vlm_cmd.is_file():
-                try:
-                    cmd = ["bash", str(vlm_cmd), str(frame_path), prompt]
-                    LOG.info("[vision] running board VLM command: %s", cmd)
-                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                    if res.returncode == 0:
-                        lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
-                        content_lines = [
-                            ln for ln in lines
-                            if not ln.startswith("[VLM]")
-                            and not ln.startswith("[RKNN]")
-                            and not ln.startswith("[P4]")
-                        ]
-                        if content_lines:
-                            return content_lines[-1]
-                    else:
-                        LOG.warning("[vision] board VLM command exited with %d: %s", res.returncode, res.stderr or res.stdout)
-                except Exception as exc:
-                    LOG.warning("[vision] board VLM command failed: %s", exc)
+        # 2. Board RKNN VLM (P5b socket or legacy run_board_vlm.sh)
+        try:
+            LOG.info("[vision] board VLM via xiaolan_cli.brain backend=%s", self.inference_backend)
+            if self.brain.unified_vlm:
+                cap = self.brain.see_via_socket(frame_path, prompt, on_token=on_token)
+            else:
+                cap = self.brain.board_vlm(frame_path, prompt)
+            if cap:
+                return cap
+        except Exception as exc:
+            LOG.warning("[vision] board VLM failed: %s", exc)
 
         # 3. Fallback: simple natural confirmation
         return "好的，已经拍下当前画面了。"
@@ -1128,19 +1193,24 @@ class Orchestrator:
         raw_shot_path = run_dir / "camera_shot.jpg"
         vlm_frame_path = run_dir / "latest_vlm.jpg"
 
-        def _do_grab_and_infer() -> tuple[bool, str]:
-            ok = self._grab_camera_frame(self.camera_url, raw_shot_path, timeout=self.camera_timeout)
-            if not ok:
-                return False, ""
-            prep_ok = self._prepare_vlm_frame(raw_shot_path, vlm_frame_path, size=self.camera_size)
-            if not prep_ok:
-                return False, ""
-            caption = self._infer_vlm(vlm_frame_path, user_prompt)
-            return True, caption
-
         t0 = time.monotonic()
         try:
-            success, caption = await asyncio.to_thread(_do_grab_and_infer)
+            ok = await asyncio.to_thread(
+                self._grab_camera_frame,
+                self.camera_url,
+                raw_shot_path,
+                self.camera_timeout,
+            )
+            success, caption = False, ""
+            if ok:
+                prep_ok = await asyncio.to_thread(
+                    self._prepare_vlm_frame, raw_shot_path, vlm_frame_path, self.camera_size
+                )
+                if prep_ok:
+                    caption = await self._board_vlm_with_web_tokens(
+                        vlm_frame_path, user_prompt, generation=generation
+                    )
+                    success = True
         except Exception as exc:
             LOG.error("[vision] exception during vision turn: %s", exc)
             success, caption = False, ""

@@ -20,34 +20,83 @@ chmod +x "${AGENT_ROOT}/scripts/display_hdmi_only.sh" 2>/dev/null || true
 
 # systemd units
 install -m 644 "${AGENT_ROOT}/systemd/r1-llm-daemon.service" /etc/systemd/system/
+if [[ -f "${AGENT_ROOT}/systemd/r1-vlm-daemon.service" ]]; then
+  install -m 644 "${AGENT_ROOT}/systemd/r1-vlm-daemon.service" /etc/systemd/system/
+fi
 install -m 644 "${AGENT_ROOT}/systemd/r1-orchestrator.service" /etc/systemd/system/
+chmod +x "${AGENT_ROOT}/scripts/orchestrator_wait_infer_sock.sh" 2>/dev/null || true
+chmod +x "${AGENT_ROOT}/scripts/wait_vlm_sock.sh" 2>/dev/null || true
+if [[ -f "${AGENT_ROOT}/systemd/r1-webui.service" ]]; then
+  install -m 644 "${AGENT_ROOT}/systemd/r1-webui.service" /etc/systemd/system/
+fi
 if [[ -f "${AGENT_ROOT}/systemd/r1-p4-eth.service" ]]; then
   install -m 644 "${AGENT_ROOT}/systemd/r1-p4-eth.service" /etc/systemd/system/
 fi
 systemctl daemon-reload
 
-# Stop manual/orphan processes before enabling services
-pkill -f "orchestrator.main" 2>/dev/null || true
-pkill -f "/userdata/agent/bin/llm_daemon" 2>/dev/null || true
-rm -f "${AGENT_ROOT}/run/orchestrator.pid" "${AGENT_ROOT}/run/llm_daemon.pid" /tmp/r1-llm.sock
-sleep 1
-
 if systemctl list-unit-files r1-p4-eth.service >/dev/null 2>&1; then
   systemctl enable r1-p4-eth.service
   systemctl start r1-p4-eth.service || true
 fi
-systemctl enable r1-llm-daemon.service r1-orchestrator.service
-systemctl restart r1-llm-daemon.service || true
-echo "[install] waiting for llm socket (up to 120s)..."
-for _ in $(seq 1 120); do
-  [[ -S /tmp/r1-llm.sock ]] && break
-  sleep 1
-done
-if [[ -S /tmp/r1-llm.sock ]]; then
-  chmod 777 /tmp/r1-llm.sock 2>/dev/null || true
-  systemctl restart r1-orchestrator.service || true
+USE_VLM=0
+if systemctl list-unit-files r1-vlm-daemon.service >/dev/null 2>&1; then
+  if [[ -x "${AGENT_ROOT}/bin/vlm_daemon" ]] && [[ -s "${AGENT_ROOT}/bin/vlm_daemon" ]]; then
+    USE_VLM=1
+    systemctl enable r1-vlm-daemon.service
+    systemctl disable r1-llm-daemon.service 2>/dev/null || true
+  fi
+fi
+if [[ "${USE_VLM}" -eq 0 ]]; then
+  systemctl enable r1-llm-daemon.service
+fi
+systemctl enable r1-orchestrator.service
+if systemctl list-unit-files r1-webui.service >/dev/null 2>&1; then
+  systemctl enable r1-webui.service
+fi
+
+# adb shell + systemctl restart often hangs (D-state). Only start if inactive; skip restart if already running.
+svc_start() {
+  local u="$1"
+  if systemctl is-active --quiet "$u" 2>/dev/null; then
+    echo "[install] $u already active — skip restart (adb-safe)"
+    return 0
+  fi
+  echo "[install] starting $u ..."
+  timeout 30 systemctl start "$u" || echo "[install] WARN: start $u timed out — reboot if stuck" >&2
+}
+
+pkill -f 'xiaolan_cli serve' 2>/dev/null || true
+pkill -f 'orchestrator.main' 2>/dev/null || true
+sleep 1
+
+if [[ "${USE_VLM}" -eq 1 ]]; then
+  svc_start r1-vlm-daemon.service
+  echo "[install] waiting for P5b vlm socket (up to 8 min)..."
+  bash "${AGENT_ROOT}/scripts/wait_vlm_sock.sh" /tmp/r1-vlm.sock 240 || true
+  SOCK="/tmp/r1-vlm.sock"
 else
-  echo "[install] WARN: llm socket not ready — journalctl -u r1-llm-daemon -n 30" >&2
+  svc_start r1-llm-daemon.service
+  echo "[install] waiting for llm socket (up to 90s)..."
+  for _ in $(seq 1 90); do
+    [[ -S /tmp/r1-llm.sock ]] && break
+    sleep 1
+  done
+  SOCK="/tmp/r1-llm.sock"
+fi
+if [[ -S "${SOCK}" ]]; then
+  chmod 777 "${SOCK}" 2>/dev/null || true
+  svc_start r1-orchestrator.service
+  if systemctl list-unit-files r1-webui.service >/dev/null 2>&1; then
+    svc_start r1-webui.service
+  fi
+else
+  echo "[install] WARN: infer socket not ready — check vlm/llm daemon logs" >&2
+fi
+
+# Disable GNOME Chromium autostart (WebUI via systemd r1-webui; avoids sudo/display D-state)
+if [[ -f "${AUTOSTART_DIR}/xiaolan-gui-autostart.desktop" ]]; then
+  rm -f "${AUTOSTART_DIR}/xiaolan-gui-autostart.desktop"
+  echo "[install] removed login autostart Chromium (use r1-webui + PC forward or open_agent_gui.sh)"
 fi
 
 # Desktop icon + app menu entry
@@ -69,18 +118,15 @@ bash "${AGENT_ROOT}/scripts/scale_desktop_icons.sh" "${USER_NAME}" 128 2.25 || t
 # Tech-style wallpaper
 bash "${AGENT_ROOT}/scripts/set_tech_wallpaper.sh" "${USER_NAME}" || true
 
-# GUI autostart on login
-install -m 644 "${AGENT_ROOT}/scripts/xiaolan-gui-autostart.desktop" \
-  "${AUTOSTART_DIR}/xiaolan-gui-autostart.desktop"
-chown "${USER_NAME}:${USER_NAME}" "${AUTOSTART_DIR}/xiaolan-gui-autostart.desktop" 2>/dev/null || true
-
 systemctl --no-pager status r1-llm-daemon.service --lines=3 || true
 systemctl --no-pager status r1-orchestrator.service --lines=3 || true
+systemctl --no-pager status r1-webui.service --lines=3 2>/dev/null || true
 
 echo ""
 echo "[install] done"
-echo "  后台服务: systemctl status r1-llm-daemon r1-orchestrator"
-echo "  桌面图标: ${DESKTOP_DIR}/xiaolan-agent.desktop"
-echo "  开机自启: systemd 语音服务 + 登录后自动打开 GUI"
+echo "  开机栈: r1-llm-daemon + r1-orchestrator (xiaolan_cli) + r1-webui (:8766)"
+echo "  PC 测试: adb forward tcp:8765 tcp:8765 && adb forward tcp:8766 tcp:8766"
+echo "  浏览器: http://127.0.0.1:8766  (API/WS :8765)"
+echo "  可选 HDMI 全屏: bash ${AGENT_ROOT}/scripts/open_agent_gui.sh"
 echo "  壁纸: ${AGENT_ROOT}/ui/wallpaper.svg"
 echo "  打开 GUI: 双击桌面「小揽语音助手」"

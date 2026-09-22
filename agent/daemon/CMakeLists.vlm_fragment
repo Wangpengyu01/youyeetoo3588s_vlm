@@ -1,0 +1,3 @@
+
+# P5b vlm_daemon (see vlm_daemon_p5b.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/vlm_daemon_p5b.cmake)

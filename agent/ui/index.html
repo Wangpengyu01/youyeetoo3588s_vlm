@@ -627,12 +627,16 @@
     <div class="brand">
       <div class="brand-logo">揽</div>
       <div class="brand-title">小揽 · 边缘多模态智能终端</div>
-      <span class="brand-sub">RK3588 · NPU 6TOPS</span>
+      <span class="brand-sub">InternVL3 · P5b vlm_daemon</span>
     </div>
     <div class="header-actions">
       <div class="status-pill">
         <span id="wsDot" class="status-dot"></span>
         <span id="wsText">连接中…</span>
+      </div>
+      <div class="status-pill">
+        <span id="vlmDot" class="status-dot"></span>
+        <span id="vlmText">VLM 检测中…</span>
       </div>
       <div class="status-pill">
         <span id="camDot" class="status-dot active"></span>
@@ -672,7 +676,7 @@
               </div>
               <div class="hud-bottom">
                 <span id="frameTimeHud" class="hud-meta">最后刷新: 刚刚</span>
-                <span id="resHud" class="hud-meta">448x448 RKNN VLM</span>
+                <span id="resHud" class="hud-meta">448×448 · RK1828 InternVL3</span>
               </div>
             </div>
           </div>
@@ -794,7 +798,7 @@
       </div>
       <div class="telemetry-item">
         <span>端侧模型:</span>
-        <span class="telemetry-value">RKNN Qwen / MiniCPM-V</span>
+        <span id="edgeModelVal" class="telemetry-value">InternVL3 · vlm_daemon</span>
       </div>
     </div>
   </footer>
@@ -807,6 +811,9 @@
     // DOM Elements
     const wsDot = document.getElementById("wsDot");
     const wsText = document.getElementById("wsText");
+    const vlmDot = document.getElementById("vlmDot");
+    const vlmText = document.getElementById("vlmText");
+    const edgeModelVal = document.getElementById("edgeModelVal");
     const camDot = document.getElementById("camDot");
     const camText = document.getElementById("camText");
     const stateBadge = document.getElementById("stateBadge");
@@ -1110,6 +1117,21 @@
             updateSceneMemory(msg.memory);
             break;
 
+          case "vision_start":
+            ensureAssistantBubble();
+            if (activeTokenSpan) activeTokenSpan.textContent = "正在通过 vlm_daemon 观察画面…";
+            updateState("llm");
+            break;
+
+          case "vision_error":
+            ensureAssistantBubble();
+            if (activeTokenSpan) {
+              activeTokenSpan.textContent = msg.error === "camera_unreachable"
+                ? "摄像头暂时不可用，请检查 RTSP 地址或网络。"
+                : "视觉分析失败，请稍后重试。";
+            }
+            break;
+
           case "vision_caption":
             ensureAssistantBubble();
             if (msg.caption) {
@@ -1132,6 +1154,22 @@
             if (msg.camera_url) rtspUrlInput.value = msg.camera_url;
             if (msg.scene_memory) updateSceneMemory(msg.scene_memory);
             if (msg.asr_backend) document.getElementById("asrBackendVal").textContent = msg.asr_backend;
+            if (msg.inference_backend || msg.llm_backend) {
+              const be = msg.inference_backend || msg.llm_backend;
+              if (edgeModelVal) {
+                edgeModelVal.textContent = be === "vlm_daemon"
+                  ? "InternVL3 · vlm_daemon (P5b)"
+                  : be + " · /tmp/r1-llm.sock";
+              }
+            }
+            if (typeof msg.vlm_daemon_ready === "boolean") {
+              vlmDot.className = msg.vlm_daemon_ready ? "status-dot active" : "status-dot warn";
+              const sock = msg.llm_socket || "/tmp/r1-vlm.sock";
+              vlmText.textContent = msg.vlm_daemon_ready
+                ? "VLM 就绪 · " + sock.replace("/tmp/", "")
+                : "VLM 未就绪 · " + sock.replace("/tmp/", "");
+            }
+            if (msg.preview_exists) refreshVideoFrame();
             break;
 
           case "latency":

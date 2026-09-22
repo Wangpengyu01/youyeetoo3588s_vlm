@@ -1,4 +1,4 @@
-# R1 agent — llm_daemon + orchestrator (Phase A/B)
+# R1 小揽 — CLI 核心 (xiaolan_cli.brain) + WebUI 封装 (WS :8765 + HTTP :8766)
 system_prompt: |
   你自己是 youyeetoo R1 专属智能管家助手小揽。
   【角色风格与说话之道】：
@@ -18,7 +18,12 @@ max_new_tokens: 768
 # InternVL 4B can anchor to an unrelated previous turn; send only the current request
 # until multi-turn context is made reliable with the model's native chat template.
 history_max_turns: 0
-socket_path: /tmp/r1-llm.sock
+# llm_daemon: /tmp/r1-llm.sock · P5b vlm_daemon (InternVL3): /tmp/r1-vlm.sock
+socket_path: /tmp/r1-vlm.sock
+
+inference:
+  # vlm_daemon (P5b) | llm_daemon (LLM-only legacy)
+  backend: vlm_daemon
 
 vad:
   model: /userdata/voice/silero_vad.onnx
@@ -92,17 +97,17 @@ camera:
   # RTSP（默认与 /userdata/p4/config/rtsp.env 一致；WebUI 可 set_camera_url 覆盖）
   url: "rtsp://192.168.2.169:554/stream_2"
   rtsp_transport: "tcp"
-  timeout: 15.0
+  timeout: 22.0
   size: 448
   prompt: "用一句话简短描述画面中的核心物品和场景。"
-  # Cooperative board VLM script: pauses llm_daemon during inference then resumes
+  # P5b: see/chat via vlm_daemon socket (inference.backend). Legacy: run_board_vlm.sh
   vlm_cmd: "/userdata/agent/scripts/run_board_vlm.sh"
   # Fast cloud/LAN VLM API (supports OpenAI-compatible endpoints e.g. Qwen-VL, Ollama, vLLM)
   # When configured, response latency is ~1.0s (skipping board model reload)
   api_url: ""
   api_key: ""
   model: "qwen-vl-plus"
-  proactive_enabled: true
-  proactive_interval_sec: 1.5
+  proactive_enabled: false
+  proactive_interval_sec: 8.0
   proactive_motion_threshold: 4.0
   proactive_cooldown_sec: 35.0

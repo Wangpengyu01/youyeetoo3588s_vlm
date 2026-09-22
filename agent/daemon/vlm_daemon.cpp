@@ -4,6 +4,7 @@
 #include "Tokenizer.h"
 #include "float16.h"
 #include "rknn3_api.h"
+#include "vlm_internvl_bridge.h"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -52,6 +53,10 @@ static std::string g_path_tok;
 static std::string g_path_embed;
 static int32_t g_max_ctx = 1024;
 static uint32_t g_core_mask = 0xff;
+static bool g_p5b_internvl = false;
+static std::string g_path_vis_model;
+static std::string g_path_vis_weight;
+static uint32_t g_vision_core_mask = 0xff;
 
 static void json_escape_append(const char *s, std::string &out)
 {
@@ -105,6 +110,32 @@ static void send_error(int fd, const char *id, const char *message)
   line += (id ? id : "");
   line += "\",\"message\":\"";
   json_escape_append(message, line);
+  line += "\"}";
+  send_line(fd, line);
+}
+
+static void internvl_token_cb(const char *piece, void *)
+{
+  if (!piece || !piece[0])
+    return;
+  int fd = g_client_fd;
+  if (g_cli_stdout)
+  {
+    fputs(piece, stdout);
+    fflush(stdout);
+    return;
+  }
+  if (fd < 0)
+    return;
+  if (g_first_decode)
+  {
+    gettimeofday(&g_first_token, NULL);
+    g_first_decode = false;
+  }
+  std::string line = "{\"type\":\"token\",\"id\":\"";
+  line += g_req_id;
+  line += "\",\"text\":\"";
+  json_escape_append(piece, line);
   line += "\"}";
   send_line(fd, line);
 }
@@ -228,7 +259,7 @@ static int result_callback(void *userdata, RKLLMResult *result, LLMCallState sta
 }
 
 static int init_context_and_model(rknn3_context *p_ctx, const char *model_path, const char *weight_path,
-                                  uint32_t core_mask, const char *device_id)
+                                  uint32_t core_mask, const char *key_path, const char *device_id)
 {
   rknn3_config config;
   rknn3_context ctx = 0;
@@ -238,15 +269,30 @@ static int init_context_and_model(rknn3_context *p_ctx, const char *model_path, 
   if (ret < 0)
     return ret;
 
-  memset(&config, 0, sizeof(config));
-  config.model_path = (char *)model_path;
-  config.weight_path = (char *)weight_path;
-  config.core_mask = core_mask;
-  ret = rknn3_load_model(ctx, &config);
-  if (ret < 0)
+  if (key_path != nullptr && strlen(key_path) > 0)
+  {
+    ret = rknn3_set_decrypt_key_from_path(ctx, key_path);
+    if (ret != RKNN3_SUCCESS)
+    {
+      rknn3_destroy(ctx);
+      return -1;
+    }
+  }
+
+  ret = rknn3_load_model_from_path(ctx, model_path, weight_path);
+  if (ret != RKNN3_SUCCESS)
   {
     rknn3_destroy(ctx);
-    return ret;
+    return -1;
+  }
+
+  memset(&config, 0, sizeof(config));
+  config.run_core_mask = core_mask;
+  ret = rknn3_model_init(ctx, &config);
+  if (ret != RKNN3_SUCCESS)
+  {
+    rknn3_destroy(ctx);
+    return -1;
   }
   *p_ctx = ctx;
   return 0;
@@ -256,13 +302,7 @@ static int get_tokenizer_and_embedding(const char *tokenizer_path, VocabInfo *vo
                                        struct embedding_info *embedding_info, const char *embedding_path,
                                        struct stat *emb_st)
 {
-  *tokenizer = new Tokenizer(tokenizer_path);
-  if (!(*tokenizer)->IsLoaded())
-  {
-    delete *tokenizer;
-    *tokenizer = nullptr;
-    return -1;
-  }
+  *tokenizer = new Tokenizer(TOKENIZER_BACKEND_LLAMA, tokenizer_path);
   (*tokenizer)->GetVocabInfo(vocab_info);
   memset(embedding_info, 0, sizeof(*embedding_info));
   embedding_info->fd = open(embedding_path, O_RDONLY);
@@ -302,7 +342,7 @@ static int init_daemon(const char *model_path, const char *weight_path, const ch
   const char *device_id = devs.devices[0].id;
   fprintf(stderr, "[daemon] device=%s\n", device_id);
 
-  ret = init_context_and_model(&g_ctx, model_path, weight_path, core_mask, device_id);
+  ret = init_context_and_model(&g_ctx, model_path, weight_path, core_mask, nullptr, device_id);
   if (ret < 0)
     return ret;
 
@@ -390,18 +430,25 @@ static bool handle_chat(int fd, const std::string &line)
   g_first_decode = true;
   gettimeofday(&g_start, NULL);
 
-  rknn3_llm_infer_param infer_param = {.keep_history = 1, .max_new_tokens = max_new};
-  rknn3_llm_input inputs[1];
-  rknn3_llm_tensor tensor = {.name = NULL,
-                             .prompt = prompt.c_str(),
-                             .embed = NULL,
-                             .tokens = NULL,
-                             .n_tokens = 0,
-                             .enable_thinking = false};
-  rknn3_llm_input input = {.input_type = RKNN3_LLM_INPUT_PROMPT, .llm_input = tensor};
-  inputs[0] = input;
-
-  int ret = rknn3_session_run(g_session, inputs, 1, &infer_param);
+  int ret = RKNN3_SUCCESS;
+  if (g_p5b_internvl)
+  {
+    ret = vlm_internvl_chat(prompt.c_str(), max_new, internvl_token_cb, nullptr);
+  }
+  else
+  {
+    rknn3_llm_infer_param infer_param = {.keep_history = 1, .max_new_tokens = max_new};
+    rknn3_llm_input inputs[1];
+    rknn3_llm_tensor tensor = {.name = NULL,
+                               .prompt = prompt.c_str(),
+                               .embed = NULL,
+                               .tokens = NULL,
+                               .n_tokens = 0,
+                               .enable_thinking = false};
+    rknn3_llm_input input = {.input_type = RKNN3_LLM_INPUT_PROMPT, .llm_input = tensor};
+    inputs[0] = input;
+    ret = rknn3_session_run(g_session, inputs, 1, &infer_param);
+  }
   gettimeofday(&g_end, NULL);
   g_client_fd = -1;
 
@@ -412,11 +459,16 @@ static bool handle_chat(int fd, const std::string &line)
     return false;
   }
 
-  RKLLMRunState state;
-  memset(&state, 0, sizeof(state));
-  rknn3_session_query_state(g_session, &state);
-  if (state.n_total_tokens >= (state.n_max_tokens - max_new))
-    rknn3_session_clear_kvcache(g_session, RKNN3_KVCACHE_CLEAR_ALL);
+  int decode_tokens = 0;
+  if (!g_p5b_internvl && g_session)
+  {
+    RKLLMRunState state;
+    memset(&state, 0, sizeof(state));
+    rknn3_session_query_state(g_session, &state);
+    decode_tokens = state.n_decode_tokens;
+    if (state.n_total_tokens >= (state.n_max_tokens - max_new))
+      rknn3_session_clear_kvcache(g_session, RKNN3_KVCACHE_CLEAR_ALL);
+  }
 
   float prefill_ms = (g_first_token.tv_sec - g_start.tv_sec) * 1e3f + (g_first_token.tv_usec - g_start.tv_usec) / 1e3f;
   if (prefill_ms < 0)
@@ -429,7 +481,7 @@ static bool handle_chat(int fd, const std::string &line)
   char done[512];
   snprintf(done, sizeof(done),
            "{\"type\":\"done\",\"id\":\"%s\",\"usage\":{\"prefill_ms\":%.2f,\"generate_ms\":%.2f,\"tokens\":%d}}",
-           req_id.c_str(), prefill_ms, generate_ms, state.n_decode_tokens);
+           req_id.c_str(), prefill_ms, generate_ms, decode_tokens);
   send_line(fd, done);
   pthread_mutex_unlock(&g_infer_mu);
   return true;
@@ -478,24 +530,31 @@ static bool vision_intent(const std::string &line)
   return false;
 }
 
-static int run_external_see(const std::string &prompt)
+static int run_see_infer(const std::string &image_path, const std::string &prompt, int max_new)
 {
+  if (g_p5b_internvl)
+  {
+    fprintf(stderr, "[vlm_daemon] P5b see in-process: %s\n", image_path.c_str());
+    pthread_mutex_lock(&g_infer_mu);
+    g_first_decode = true;
+    gettimeofday(&g_start, NULL);
+    int rc = vlm_internvl_see(image_path.c_str(), prompt.c_str(), max_new, internvl_token_cb, nullptr);
+    gettimeofday(&g_end, NULL);
+    pthread_mutex_unlock(&g_infer_mu);
+    return rc;
+  }
   setenv("VLM_SEE_PROMPT", prompt.c_str(), 1);
   std::string cmd = "bash ";
   cmd += VLM_CLI_SEE;
   cmd += " 2>/userdata/agent/logs/vlm_daemon_see.err";
-  fprintf(stderr, "[vlm_daemon] release 1828 → external see…\n");
+  fprintf(stderr, "[vlm_daemon] M1 bridge see (external)…\n");
   pthread_mutex_lock(&g_infer_mu);
   teardown_session();
   pthread_mutex_unlock(&g_infer_mu);
   int rc = system(cmd.c_str());
   if (init_daemon(g_path_model.c_str(), g_path_weight.c_str(), g_path_tok.c_str(), g_path_embed.c_str(),
                   g_max_ctx, g_core_mask) != 0)
-  {
-    fprintf(stderr, "[vlm_daemon] re-init after see failed\n");
     return -1;
-  }
-  fprintf(stderr, "[vlm_daemon] LLM session restored\n");
   return rc;
 }
 
@@ -508,18 +567,17 @@ static bool handle_see(int fd, const std::string &line)
   if (!json_get_string(line, "id", req_id))
     req_id = "see";
   std::string image_path;
-  json_get_string(line, "image_path", image_path);
+  if (!json_get_string(line, "image_path", image_path) || image_path.empty())
+    image_path = "/userdata/agent/run/camera_shot.jpg";
+  int max_new = json_get_int(line, "max_new_tokens", 128);
 
-  (void)image_path;
   pthread_mutex_lock(&g_infer_mu);
   g_client_fd = fd;
   g_req_id = req_id;
   g_cli_stdout = false;
   pthread_mutex_unlock(&g_infer_mu);
 
-  gettimeofday(&g_start, NULL);
-  int rc = run_external_see(prompt);
-  gettimeofday(&g_end, NULL);
+  int rc = run_see_infer(image_path, prompt, max_new);
   g_client_fd = -1;
 
   if (rc != 0)
@@ -556,7 +614,7 @@ static void cli_loop()
     if (vision_intent(line))
     {
       fputs("\n", stdout);
-      run_external_see(line);
+      run_see_infer("/userdata/agent/run/camera_shot.jpg", line, 128);
       fputs("\n小揽> ", stdout);
       fflush(stdout);
       continue;
@@ -580,7 +638,11 @@ static void cli_loop()
                                .enable_thinking = false};
     rknn3_llm_input input = {.input_type = RKNN3_LLM_INPUT_PROMPT, .llm_input = tensor};
     inputs[0] = input;
-    int ret = rknn3_session_run(g_session, inputs, 1, &infer_param);
+    int ret = RKNN3_SUCCESS;
+    if (g_p5b_internvl)
+      ret = vlm_internvl_chat(line.c_str(), 64, internvl_token_cb, nullptr);
+    else
+      ret = rknn3_session_run(g_session, inputs, 1, &infer_param);
     g_cli_stdout = false;
     g_client_fd = -1;
     pthread_mutex_unlock(&g_infer_mu);
@@ -604,7 +666,8 @@ static void handle_request(int fd, const std::string &line)
   if (line.find("clear_history") != std::string::npos)
   {
     pthread_mutex_lock(&g_infer_mu);
-    rknn3_session_clear_kvcache(g_session, RKNN3_KVCACHE_CLEAR_ALL);
+    if (g_session)
+      rknn3_session_clear_kvcache(g_session, RKNN3_KVCACHE_CLEAR_ALL);
     pthread_mutex_unlock(&g_infer_mu);
     send_line(fd, "{\"type\":\"ok\",\"op\":\"clear_history\"}");
     return;
@@ -702,29 +765,64 @@ int main(int argc, char **argv)
   }
   if (argc < base + 7)
   {
-    LOGW("Usage: %s [--cli] <rknn> <weight> <tokenizer.gguf> <embed.bin> <ctx> <default_max_new> <core_mask> [sock_path]\n",
+    LOGW("Usage (LLM-only M1): %s [--cli] <llm.rknn> <llm.weight> <tok> <embed> <ctx> <max_new> <core> [sock]\n",
          argv[0]);
-    LOGW("  --cli: stdin shell (vision phrases → %s)\n", VLM_CLI_SEE);
+    LOGW("Usage (P5b six-pack): %s [--cli] <vis.rknn> <vis.w> <llm.rknn> <llm.w> <tok> <embed> <ctx> <max_new> <vis_core> <llm_core> [sock]\n",
+         argv[0]);
     return 1;
   }
 
+  g_p5b_internvl = (argc >= base + 11);
+
   signal(SIGINT, on_signal);
   signal(SIGTERM, on_signal);
-  if (argc >= base + 8)
-    strncpy(g_sock_path, argv[base + 7], sizeof(g_sock_path) - 1);
-
-  g_path_model = argv[base + 0];
-  g_path_weight = argv[base + 1];
-  g_path_tok = argv[base + 2];
-  g_path_embed = argv[base + 3];
-  g_max_ctx = atoi(argv[base + 4]);
-  g_core_mask = (uint32_t)strtoul(argv[base + 6], NULL, 16);
-
-  if (init_daemon(g_path_model.c_str(), g_path_weight.c_str(), g_path_tok.c_str(), g_path_embed.c_str(), g_max_ctx,
-                  g_core_mask) != 0)
+  if (g_p5b_internvl)
   {
-    fprintf(stderr, "[vlm_daemon] init failed\n");
-    return 1;
+    if (argc >= base + 12)
+      strncpy(g_sock_path, argv[base + 11], sizeof(g_sock_path) - 1);
+    g_path_vis_model = argv[base + 0];
+    g_path_vis_weight = argv[base + 1];
+    g_path_model = argv[base + 2];
+    g_path_weight = argv[base + 3];
+    g_path_tok = argv[base + 4];
+    g_path_embed = argv[base + 5];
+    g_max_ctx = atoi(argv[base + 6]);
+    g_vision_core_mask = (uint32_t)strtoul(argv[base + 8], NULL, 16);
+    g_core_mask = (uint32_t)strtoul(argv[base + 9], NULL, 16);
+    struct vlm_internvl_config icfg = {
+        .vision_rknn = g_path_vis_model.c_str(),
+        .vision_weight = g_path_vis_weight.c_str(),
+        .llm_rknn = g_path_model.c_str(),
+        .llm_weight = g_path_weight.c_str(),
+        .tokenizer_path = g_path_tok.c_str(),
+        .embed_path = g_path_embed.c_str(),
+        .llm_core_mask = g_core_mask,
+        .vision_core_mask = g_vision_core_mask,
+        .max_context_len = g_max_ctx,
+    };
+    if (vlm_internvl_init(&icfg) != 0)
+    {
+      fprintf(stderr, "[vlm_daemon] P5b internvl init failed\n");
+      return 1;
+    }
+    fprintf(stderr, "[vlm_daemon] P5b six-tuple ready sock=%s\n", g_sock_path);
+  }
+  else
+  {
+    if (argc >= base + 8)
+      strncpy(g_sock_path, argv[base + 7], sizeof(g_sock_path) - 1);
+    g_path_model = argv[base + 0];
+    g_path_weight = argv[base + 1];
+    g_path_tok = argv[base + 2];
+    g_path_embed = argv[base + 3];
+    g_max_ctx = atoi(argv[base + 4]);
+    g_core_mask = (uint32_t)strtoul(argv[base + 6], NULL, 16);
+    if (init_daemon(g_path_model.c_str(), g_path_weight.c_str(), g_path_tok.c_str(), g_path_embed.c_str(), g_max_ctx,
+                    g_core_mask) != 0)
+    {
+      fprintf(stderr, "[vlm_daemon] init failed\n");
+      return 1;
+    }
   }
 
   int rc = 0;
@@ -733,9 +831,14 @@ int main(int argc, char **argv)
   else
     rc = serve_forever();
 
-  pthread_mutex_lock(&g_infer_mu);
-  teardown_session();
-  pthread_mutex_unlock(&g_infer_mu);
+  if (g_p5b_internvl)
+    vlm_internvl_deinit();
+  else
+  {
+    pthread_mutex_lock(&g_infer_mu);
+    teardown_session();
+    pthread_mutex_unlock(&g_infer_mu);
+  }
 
   return rc;
 }

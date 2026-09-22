@@ -65,7 +65,12 @@ PY
 
 start_http() {
   if [[ "$(port_listening)" == "yes" ]]; then
+    log "HTTP ${PORT} already up (r1-webui?)"
     return 0
+  fi
+  if systemctl is-active --quiet r1-webui.service 2>/dev/null; then
+    log "waiting for r1-webui on ${PORT}..."
+    wait_ui_ready && return 0
   fi
   if [[ -f "${PIDFILE}" ]]; then
     old_pid="$(cat "${PIDFILE}")"

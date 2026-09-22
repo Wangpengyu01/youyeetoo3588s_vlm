@@ -23,12 +23,16 @@ fi
 
 rm -f "${SOCK}"
 
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-/userdata/rknn_InternVLM_demo/lib:/usr/lib}"
+
 nohup "${BIN}" \
+  "${MODEL_DIR}/vision_InternVL3_5-4B.rknn" \
+  "${MODEL_DIR}/vision_InternVL3_5-4B.weight" \
   "${MODEL_DIR}/llm_InternVL3_5-4B.rknn" \
   "${MODEL_DIR}/llm_InternVL3_5-4B.weight" \
   "${MODEL_DIR}/InternVL3_5-4B.tokenizer.gguf" \
   "${MODEL_DIR}/InternVL3_5-4B.embed.bin" \
-  1024 64 0xff \
+  1024 128 0xff 0xff "${SOCK}" \
   >>"${LOG}" 2>&1 &
 
 echo $! >"${PIDFILE}"

@@ -1,0 +1,10 @@
+
+# --- P5b vlm_daemon (append to rknn3_session_test_demo/Makefile once) ---
+TARGET_VLM_DAEMON := vlm_daemon
+VLM_DAEMON_SRCS := src/vlm_daemon.cpp src/vlm_internvl_bridge.cpp src/Tokenizer.cpp
+
+$(TARGET_VLM_DAEMON): $(VLM_DAEMON_SRCS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $(VLM_DAEMON_SRCS) $(LDFLAGS) $(LIBS)
+
+.PHONY: vlm_daemon
+vlm_daemon: $(TARGET_VLM_DAEMON)

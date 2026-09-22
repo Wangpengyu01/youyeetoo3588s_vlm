@@ -1,0 +1,35 @@
+[Unit]
+Description=P5b vlm_daemon (InternVL six-tuple unified chat+see)
+After=r1-p4-eth.service rknn3.service network-online.target
+Wants=r1-p4-eth.service network-online.target
+Conflicts=r1-llm-daemon.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=AGENT_ROOT=/userdata/agent
+Environment=LD_LIBRARY_PATH=/userdata/rknn_InternVLM_demo/lib:/usr/lib
+WorkingDirectory=/userdata/agent
+ExecStartPre=/bin/mkdir -p /userdata/agent/logs /userdata/agent/run
+ExecStartPre=/bin/bash /userdata/agent/scripts/wait_rknn_vlm.sh 120
+ExecStartPre=/bin/rm -f /tmp/r1-vlm.sock
+ExecStart=/userdata/agent/bin/vlm_daemon \
+  /userdata/models/InternVL3_5-4B/vision_InternVL3_5-4B.rknn \
+  /userdata/models/InternVL3_5-4B/vision_InternVL3_5-4B.weight \
+  /userdata/models/InternVL3_5-4B/llm_InternVL3_5-4B.rknn \
+  /userdata/models/InternVL3_5-4B/llm_InternVL3_5-4B.weight \
+  /userdata/models/InternVL3_5-4B/InternVL3_5-4B.tokenizer.gguf \
+  /userdata/models/InternVL3_5-4B/InternVL3_5-4B.embed.bin \
+  1024 128 0xff 0xff /tmp/r1-vlm.sock
+# vlm_daemon chmods socket before listen; ExecStartPost must not fail unit while six-tuple loads (>120s)
+StandardOutput=append:/userdata/agent/logs/vlm_daemon.log
+StandardError=append:/userdata/agent/logs/vlm_daemon.log
+Restart=on-failure
+RestartSec=30
+KillMode=mixed
+TimeoutStartSec=600
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

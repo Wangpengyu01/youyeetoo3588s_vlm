@@ -31,6 +31,7 @@ function Push-PyTree($LocalDir, $RemoteDir) {
 
 Push-PyTree "$Root\agent\asr" "$Board/asr"
 Push-PyTree "$Root\agent\orchestrator" "$Board/orchestrator"
+Push-PyTree "$Root\agent\xiaolan_cli" "$Board/xiaolan_cli"
 Push-PyTree "$Root\agent\llm" "$Board/llm"
 Push-PyTree "$Root\agent\tts" "$Board/tts"
 Push-PyTree "$Root\agent\api" "$Board/api"
@@ -53,7 +54,7 @@ Get-ChildItem "$Root\agent\scripts" -Filter "*.desktop" | ForEach-Object {
     Push-Lf $_.FullName "$Board/scripts/$($_.Name)"
 }
 
-adb shell "chmod +x $Board/scripts/*.sh 2>/dev/null; chmod +x $Board/bin/* 2>/dev/null; ls -la $Board/scripts/"
+adb shell "find $Board/scripts -name '*.sh' -exec sed -i 's/\r$//' {} + 2>/dev/null; chmod +x $Board/scripts/*.sh 2>/dev/null; chmod +x $Board/bin/* 2>/dev/null; ls -la $Board/scripts/"
 
 if (Test-Path "$Root\agent\bin\llm_daemon") {
     adb push "$Root\agent\bin\llm_daemon" "$Board/bin/llm_daemon"

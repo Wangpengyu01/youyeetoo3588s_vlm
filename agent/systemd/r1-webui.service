@@ -1,0 +1,19 @@
+[Unit]
+Description=小揽 WebUI static (HTTP 8766, wraps CLI via orchestrator WS 8765)
+After=r1-orchestrator.service network.target
+Wants=r1-orchestrator.service
+
+[Service]
+Type=simple
+User=youyeetoo
+Group=youyeetoo
+Environment=AGENT_ROOT=/userdata/agent
+WorkingDirectory=/userdata/agent
+ExecStart=/usr/bin/python3 -m http.server 8766 --bind 0.0.0.0 --directory /userdata/agent/ui
+StandardOutput=append:/userdata/agent/logs/webui.log
+StandardError=append:/userdata/agent/logs/webui.log
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

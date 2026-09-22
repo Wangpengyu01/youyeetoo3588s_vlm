@@ -7,6 +7,8 @@ from typing import Any
 
 def _parse_scalar(val: str) -> Any:
     val = val.strip().strip('"').strip("'")
+    if "#" in val:
+        val = val.split("#", 1)[0].strip()
     if val.isdigit():
         return int(val)
     try:
