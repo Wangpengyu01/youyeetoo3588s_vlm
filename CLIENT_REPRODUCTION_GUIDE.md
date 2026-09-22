@@ -78,9 +78,21 @@ camera:
 ```
 > **提示**：若暂无实体 RTSP 摄像头，可以直接在手机上下载 “IP 摄像头” 等 App 开启 RTSP/HTTP 局域网推流，或先使用默认配置；后续也可以**直接在 Web UI 界面输入框中动态切换流地址，免重启！**
 
-### 步骤 3：一键启动完整服务
-运行启动脚本依次启动 LLM 守护进程与核心智能体：
+### 步骤 3：一键启动完整服务（推荐）
+在终端直接执行全服务一键启停脚本，系统将自动依次初始化端侧大模型、智能体核心中枢与 Web UI 控制台：
 
+```bash
+# 【一键全启动】自动拉起 LLM、Orchestrator 及 Web 控制台
+bash /userdata/agent/scripts/quickstart_all.sh
+
+# 查看所有组件运行状态
+bash /userdata/agent/scripts/quickstart_all.sh status
+
+# 停止所有服务（如需退出）
+bash /userdata/agent/scripts/quickstart_all.sh stop
+```
+
+*(可选分步启动方式)*：
 ```bash
 # 1. 启动端侧 LLM 进程 (RKNN NPU 后台加速)
 bash /userdata/agent/scripts/start_llm_daemon.sh
@@ -88,13 +100,13 @@ bash /userdata/agent/scripts/start_llm_daemon.sh
 # 2. 启动小揽核心智能体 (VAD + ASR + TTS + 视觉中枢 + WebSocket)
 bash /userdata/agent/scripts/start_orchestrator.sh
 
-# 3. 启动 Web UI 远程服务
+# 3. 启动 Web UI 远程服务 (端口 8766)
 bash /userdata/agent/scripts/open_agent_gui.sh
 ```
 
-检查进程运行状态：
+检查进程运行与端口监听：
 ```bash
-# 查看智能体日志
+# 查看实时日志
 tail -f /userdata/agent/logs/orchestrator.log
 
 # 检查服务端口监听 (8765 为 WebSocket API, 8766 为 Web UI 控制台)
