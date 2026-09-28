@@ -1,0 +1,13 @@
+[Unit]
+Description=USB RNDIS (usb0) for PC access — separate from eth0 camera LAN
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /userdata/p4/scripts/boot_rndis_usb.sh
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

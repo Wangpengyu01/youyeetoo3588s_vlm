@@ -1,3 +1,12 @@
+# Runtime WebUI preview (written on board by frame daemon / orchestrator)
+agent/ui/latest_frame.jpg
+
+# Demo recovery zip output
+/dist/r1_demo_recovery.zip
+/agent/pack/r1_demo_recovery/payload/agent/
+/agent/pack/r1_demo_recovery/payload/p4/
+/agent/pack/r1_demo_recovery/payload/voice/
+
 # Secrets
 .env
 .env.*
@@ -79,3 +88,6 @@ canvases/node_modules/
 
 # Windows adb push temp
 *.bak
+
+# MediaMTX release tarball (push to board, do not commit)
+mediamtx_*.tar.gz

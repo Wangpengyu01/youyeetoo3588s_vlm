@@ -44,7 +44,7 @@ Get-ChildItem "$Root\agent\scripts" -Filter "*.sh" | ForEach-Object {
 }
 Push-Lf "$Root\agent\config\agent.yaml" "$Board/config/agent.yaml"
 
-Get-ChildItem "$Root\agent\ui" -File | ForEach-Object {
+Get-ChildItem "$Root\agent\ui" -File | Where-Object { $_.Name -ne "latest_frame.jpg" } | ForEach-Object {
     Push-Lf $_.FullName "$Board/ui/$($_.Name)"
 }
 Get-ChildItem "$Root\agent\systemd" -Filter "*.service" | ForEach-Object {

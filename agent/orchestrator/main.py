@@ -17,6 +17,16 @@ if str(_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(_AGENT_ROOT))
 
 from api.event_bus import EventBus
+from orchestrator.mediamtx_camera import (
+    MediamtxCameraConfig,
+    copy_mediamtx_cache_file,
+    grab_mediamtx_vlm_pair,
+    mediamtx_cache_age_sec,
+    mediamtx_cache_available,
+    mediamtx_cache_fresh,
+    preview_jpeg_bytes_valid,
+    uses_mediamtx,
+)
 from api.ws_server import run_ws_server
 from asr.asr_engine import AsrEngine, AsrEngineConfig
 from asr.normalize import normalize_user_text
@@ -120,6 +130,7 @@ class Orchestrator:
         self.camera_timeout = float(cam_cfg.get("timeout", 2.5))
         self.camera_size = int(cam_cfg.get("size", 448))
         self.camera_prompt = str(cam_cfg.get("prompt", "用一句话简短描述画面中的核心物品和场景。"))
+        self.camera_see_max_new_tokens = int(cam_cfg.get("see_max_new_tokens", 96))
         self.camera_vlm_cmd = str(cam_cfg.get("vlm_cmd", "/userdata/p4/scripts/vlm_see.sh"))
         self.camera_api_url = str(cam_cfg.get("api_url", "")).strip()
         self.camera_api_key = str(cam_cfg.get("api_key", "")).strip()
@@ -128,6 +139,25 @@ class Orchestrator:
         self.proactive_interval_sec = float(cam_cfg.get("proactive_interval_sec", 2.5))
         self.proactive_motion_threshold = float(cam_cfg.get("proactive_motion_threshold", 4.0))
         self.proactive_cooldown_sec = float(cam_cfg.get("proactive_cooldown_sec", 35.0))
+        mtx = cam_cfg.get("mediamtx") or {}
+        self.camera_grab_backend = str(cam_cfg.get("grab_backend", "rtsp")).strip().lower()
+        mtx_path = str(mtx.get("path", cam_cfg.get("mediamtx_path", "cam"))).strip() or "cam"
+        self.mediamtx_cfg = MediamtxCameraConfig(
+            path=mtx_path,
+            rtsp_url=str(mtx.get("rtsp_url", f"rtsp://127.0.0.1:8554/{mtx_path}")),
+            whep_url=str(mtx.get("whep_url", f"http://127.0.0.1:8889/{mtx_path}/whep")),
+            latest_frame=str(mtx.get("latest_frame", str(agent_root / "run" / "mediamtx_latest.jpg"))),
+            cache_max_age_sec=float(mtx.get("cache_max_age_sec", 0.8)),
+            grab_backend=self.camera_grab_backend,
+        )
+        if self.camera_grab_backend.startswith("mediamtx") or self.camera_grab_backend == "whep":
+            self.camera_url = self.mediamtx_cfg.rtsp_url
+            LOG.info(
+                "[camera] mediamtx grab_backend=%s whep=%s rtsp=%s",
+                self.camera_grab_backend,
+                self.mediamtx_cfg.whep_url,
+                self.mediamtx_cfg.rtsp_url,
+            )
         self._last_proactive_speak_at = 0.0
         self._latest_camera_bytes: bytes | None = None
         self._latest_camera_time: float = 0.0
@@ -660,11 +690,82 @@ class Orchestrator:
             size=size,
         )
 
+    def _uses_mediamtx_grab(self) -> bool:
+        return uses_mediamtx(getattr(self, "mediamtx_cfg", MediamtxCameraConfig()))
+
+    def _mediamtx_cache_fresh(self) -> bool:
+        cfg = getattr(self, "mediamtx_cfg", None)
+        return bool(cfg) and mediamtx_cache_fresh(cfg)
+
+    def _sync_preview_from_mediamtx_cache(self) -> bool:
+        """WebUI preview: latest mediamtx_latest.jpg → ui/latest_frame.jpg."""
+        if not self._uses_mediamtx_grab():
+            return False
+        ui_path = self.agent_root / "ui" / "latest_frame.jpg"
+        if not copy_mediamtx_cache_file(self.mediamtx_cfg, ui_path):
+            return False
+        try:
+            data = ui_path.read_bytes()
+            self._latest_camera_bytes = data
+            self._latest_camera_time = time.monotonic()
+        except OSError:
+            return False
+        return True
+
+    def _grab_and_prepare_vlm_frame(
+        self,
+        raw_path: Path,
+        vlm_path: Path,
+        *,
+        timeout: float | None = None,
+        force_live: bool = False,
+        cache_only: bool = False,
+    ) -> tuple[bool, str]:
+        """Grab + 448 prep for InternVL see. Returns (ok, source tag)."""
+        t_out = float(timeout if timeout is not None else self.camera_timeout)
+        size = int(getattr(self, "camera_size", 448))
+        if self._uses_mediamtx_grab():
+            cfg = self.mediamtx_cfg
+            ok, src = grab_mediamtx_vlm_pair(
+                cfg,
+                raw_path,
+                vlm_path,
+                timeout=t_out,
+                size=size,
+                force_live=force_live,
+                cache_only=cache_only,
+            )
+            if ok and vlm_path.is_file():
+                data = vlm_path.read_bytes()
+                self._latest_camera_bytes = data
+                self._latest_camera_time = time.monotonic()
+                self._sync_ui_preview_frame(data)
+            return ok, src
+        ok = self._grab_camera_frame(self.camera_url, raw_path, timeout=t_out, max_cache_age_sec=0.0)
+        if not ok:
+            return False, "miss"
+        prep = self._prepare_vlm_frame(raw_path, vlm_path, size=size)
+        return prep, "rtsp_direct" if prep else "miss"
+
+    def _vision_prefers_scene_memory_only(self, user_prompt: str) -> bool:
+        """Activity-style questions can answer from memory; desk/object queries need see."""
+        if any(k in user_prompt for k in ("重新", "重看", "再看", "刷新", "拍张照", "拍个照")):
+            return False
+        if any(k in user_prompt for k in ("干什么", "干嘛", "做什么", "在干", "在做")):
+            return True
+        if self._uses_mediamtx_grab():
+            return False
+        return bool(str(getattr(self, "_scene_memory", {}).get("caption", "")).strip())
+
     def _sync_ui_preview_frame(self, data: bytes) -> None:
         try:
+            if not preview_jpeg_bytes_valid(data):
+                return
             ui_frame_path = self.agent_root / "ui" / "latest_frame.jpg"
             ui_frame_path.parent.mkdir(parents=True, exist_ok=True)
-            ui_frame_path.write_bytes(data)
+            tmp = ui_frame_path.with_suffix(".part.jpg")
+            tmp.write_bytes(data)
+            tmp.replace(ui_frame_path)
         except Exception:
             pass
 
@@ -677,6 +778,23 @@ class Orchestrator:
     ) -> bool:
         try:
             now = time.monotonic()
+            grab_backend = getattr(self, "camera_grab_backend", "rtsp")
+            if grab_backend.startswith("mediamtx") or grab_backend == "whep":
+                mtx = getattr(self, "mediamtx_cfg", None)
+                if mtx and mediamtx_cache_fresh(mtx):
+                    latest = Path(mtx.latest_frame)
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    data = latest.read_bytes()
+                    save_path.write_bytes(data)
+                    self._latest_camera_bytes = data
+                    self._latest_camera_time = now
+                    self._sync_ui_preview_frame(data)
+                    LOG.info(
+                        "[camera] mediamtx latest_frame hit (age=%.2fs, %d bytes)",
+                        mediamtx_cache_age_sec(mtx) or 0,
+                        len(data),
+                    )
+                    return True
             # 1. Zero-wait in-memory cache hit
             if (
                 self._latest_camera_bytes
@@ -693,7 +811,15 @@ class Orchestrator:
                 return True
 
             data: bytes | None = None
-            if url.startswith("rtsp://"):
+            if grab_backend.startswith("mediamtx") or grab_backend == "whep":
+                from orchestrator.mediamtx_camera import grab_mediamtx_frame
+
+                size = int(getattr(self, "camera_size", 448))
+                mtx = getattr(self, "mediamtx_cfg", None)
+                if mtx and grab_mediamtx_frame(mtx, save_path, timeout=timeout, size=size):
+                    data = save_path.read_bytes()
+                    LOG.info("[camera] mediamtx grab ok (%d bytes) backend=%s", len(data), grab_backend)
+            elif url.startswith("rtsp://"):
                 ok = False
                 try:
                     self.brain.grab_frame(save_path, rtsp_url=url)
@@ -881,11 +1007,9 @@ class Orchestrator:
         elif mtype in ("set_camera_url", "update_camera"):
             url = str(data.get("url", "")).strip()
             if url:
-                self.camera_url = url
                 if "transport" in data:
                     self.camera_rtsp_transport = str(data.get("transport", "tcp")).strip()
-                LOG.info("[ws] camera URL updated to %s (transport=%s)", self.camera_url, self.camera_rtsp_transport)
-                asyncio.create_task(self._test_camera_connection())
+                asyncio.create_task(self._apply_camera_url_change(url))
         elif mtype in ("get_status", "status", "ping"):
             await self._broadcast_status()
         elif mtype in ("stop", "abort", "tts_abort"):
@@ -940,28 +1064,88 @@ class Orchestrator:
         vlm_frame_path = run_dir / "latest_vlm.jpg"
 
         await self.emit({"type": "vision_start", "query": user_prompt, "generation": 0})
-        ok = await asyncio.to_thread(
-            self._grab_camera_frame,
-            self.camera_url,
-            raw_shot_path,
-            self.camera_timeout,
-            0.0,
-        )
         success, caption = False, ""
+        ok, _src = await asyncio.to_thread(
+            self._grab_and_prepare_vlm_frame,
+            raw_shot_path,
+            vlm_frame_path,
+            cache_only=self._uses_mediamtx_grab(),
+        )
         if ok:
-            prep_ok = await asyncio.to_thread(
-                self._prepare_vlm_frame, raw_shot_path, vlm_frame_path, self.camera_size
+            await self.emit(
+                {"type": "camera_frame", "motion": 0, "timestamp": time.time(), "grab_source": _src}
             )
-            if prep_ok:
-                caption = await self._board_vlm_with_web_tokens(
-                    vlm_frame_path, user_prompt, generation=0
-                )
-                success = True
+            caption = await self._board_vlm_with_web_tokens(
+                vlm_frame_path, user_prompt, generation=0
+            )
+            success = True
         if success and caption:
             self._save_scene_memory(caption)
             await self.emit({"type": "vision_caption", "caption": caption, "generation": 0, "url": "/latest_frame.jpg"})
         else:
             await self.emit({"type": "vision_error", "error": "camera_unreachable", "generation": 0})
+
+    def _update_mediamtx_rtsp_upstream(self, rtsp_url: str) -> None:
+        """Point mediamtx pull at a new camera RTSP URL (WebUI stream switch)."""
+        p4 = Path("/userdata/p4")
+        env_path = p4 / "config" / "rtsp.env"
+        if not env_path.is_file():
+            LOG.warning("[camera] no %s — cannot switch mediamtx upstream", env_path)
+            return
+        lines: list[str] = []
+        replaced = False
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().startswith("RTSP_URL="):
+                lines.append(f"RTSP_URL={rtsp_url}")
+                replaced = True
+            else:
+                lines.append(line)
+        if not replaced:
+            lines.append(f"RTSP_URL={rtsp_url}")
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        gen = p4 / "scripts" / "mediamtx_gen_config.sh"
+        if gen.is_file():
+            subprocess.run(["bash", str(gen)], check=False, timeout=30)
+        subprocess.run(["pkill", "-x", "mediamtx"], check=False)
+        time.sleep(1)
+        mtx_bin = p4 / "bin" / "mediamtx"
+        mtx_cfg = p4 / "config" / "mediamtx.yml"
+        if mtx_bin.is_file() and mtx_cfg.is_file():
+            subprocess.Popen(
+                [str(mtx_bin), str(mtx_cfg)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        cache = Path(getattr(self.mediamtx_cfg, "latest_frame", "/userdata/agent/run/mediamtx_latest.jpg"))
+        try:
+            cache.unlink(missing_ok=True)
+        except OSError:
+            pass
+        LOG.info("[camera] mediamtx upstream -> %s (cache cleared)", rtsp_url)
+
+    async def _apply_camera_url_change(self, url: str) -> None:
+        self.camera_url = url
+        LOG.info("[ws] camera URL updated to %s (transport=%s)", self.camera_url, self.camera_rtsp_transport)
+        local_mediamtx = "127.0.0.1" in url or ":8554/" in url
+        if self._uses_mediamtx_grab() and url.startswith("rtsp://") and not local_mediamtx:
+            await asyncio.to_thread(self._update_mediamtx_rtsp_upstream, url)
+        ok = await asyncio.to_thread(
+            self._grab_camera_frame,
+            self.camera_url if not self._uses_mediamtx_grab() else self.mediamtx_cfg.rtsp_url,
+            self.agent_root / "run" / "camera_test.jpg",
+            self.camera_timeout,
+            0.0,
+        )
+        if ok:
+            await self.emit({"type": "camera_frame", "motion": 0, "timestamp": time.time()})
+        await self.emit(
+            {
+                "type": "camera_status",
+                "url": self.camera_url,
+                "transport": self.camera_rtsp_transport,
+                "connected": ok,
+            }
+        )
 
     async def _test_camera_connection(self) -> None:
         run_dir = self.agent_root / "run"
@@ -999,6 +1183,10 @@ class Orchestrator:
             "llm_socket": self.socket_path,
             "vlm_daemon_ready": vlm_ready,
             "llm_backend": self.inference_backend,
+            "camera_grab_backend": getattr(self, "camera_grab_backend", "rtsp"),
+            "mediamtx_cache_age_sec": mediamtx_cache_age_sec(self.mediamtx_cfg)
+            if self._uses_mediamtx_grab()
+            else None,
         })
 
     async def _board_vlm_with_web_tokens(
@@ -1089,7 +1277,12 @@ class Orchestrator:
         try:
             LOG.info("[vision] board VLM via xiaolan_cli.brain backend=%s", self.inference_backend)
             if self.brain.unified_vlm:
-                cap = self.brain.see_via_socket(frame_path, prompt, on_token=on_token)
+                cap = self.brain.see_via_socket(
+                    frame_path,
+                    prompt,
+                    on_token=on_token,
+                    max_new_tokens=self.camera_see_max_new_tokens,
+                )
             else:
                 cap = self.brain.board_vlm(frame_path, prompt)
             if cap:
@@ -1144,12 +1337,11 @@ class Orchestrator:
         self.set_state(AgentState.LLM)
         await self.emit({"type": "vision_start", "query": user_prompt, "generation": generation})
 
-        # Check if user explicitly asks for a fresh re-scan
         is_refresh_query = any(k in user_prompt for k in ("重新", "重看", "再看", "刷新", "拍张照", "拍个照"))
         cached_caption = str(getattr(self, "_scene_memory", {}).get("caption", "")).strip()
 
-        # 1. Zero-wait Visual Scene Memory: if we already have perceived scene, respond in ~0.5s!
-        if cached_caption and not is_refresh_query:
+        # 1. Scene memory fast path (activity-only when using mediamtx — object queries always see)
+        if cached_caption and self._vision_prefers_scene_memory_only(user_prompt):
             LOG.info(
                 "[vision] zero-wait: using visual scene memory (%.2fs old): %s",
                 time.monotonic() - float(getattr(self, "_scene_memory", {}).get("updated_at", 0.0)),
@@ -1177,13 +1369,29 @@ class Orchestrator:
                 self._listen_cooldown_until = time.monotonic() + self.listen_cooldown_sec
             return
 
-        # Provide immediate verbal feedback so the user knows on-board model is analyzing
-        # If fast cloud/LAN API is configured, skip wait prompt to achieve true second-level latency
-        is_fast_api = bool(self.camera_api_url and self.camera_api_key)
-        if not is_fast_api:
-            await self._speak_turn("好的主人，小揽正在观察画面，请稍候。", generation=generation)
-            if self._tts_abort or generation != self._active_turn_id:
-                return
+        # No filler TTS before see: WebUI already gets vision_start; board see runs immediately.
+        if self._uses_mediamtx_grab():
+            age = mediamtx_cache_age_sec(self.mediamtx_cfg)
+            if mediamtx_cache_available(self.mediamtx_cfg):
+                LOG.info(
+                    "[vision] mediamtx cache ready (age=%s) — no wait TTS",
+                    f"{age:.2f}s" if age is not None else "?",
+                )
+            else:
+                LOG.info("[vision] mediamtx cache missing — still skip wait TTS, grab then see")
+
+        use_mtx_cache = is_refresh_query and self._uses_mediamtx_grab()
+        if use_mtx_cache:
+            synced = await asyncio.to_thread(self._sync_preview_from_mediamtx_cache)
+            if synced:
+                await self.emit(
+                    {
+                        "type": "camera_frame",
+                        "motion": 0,
+                        "timestamp": time.time(),
+                        "grab_source": "cache",
+                    }
+                )
 
         run_dir = self.agent_root / "run"
         try:
@@ -1194,23 +1402,38 @@ class Orchestrator:
         vlm_frame_path = run_dir / "latest_vlm.jpg"
 
         t0 = time.monotonic()
+        grab_source = "miss"
         try:
-            ok = await asyncio.to_thread(
-                self._grab_camera_frame,
-                self.camera_url,
+            ok, grab_source = await asyncio.to_thread(
+                self._grab_and_prepare_vlm_frame,
                 raw_shot_path,
-                self.camera_timeout,
+                vlm_frame_path,
+                force_live=False,
+                cache_only=use_mtx_cache,
             )
+            if use_mtx_cache and not ok:
+                ok, grab_source = await asyncio.to_thread(
+                    self._grab_and_prepare_vlm_frame,
+                    raw_shot_path,
+                    vlm_frame_path,
+                    force_live=False,
+                    cache_only=False,
+                )
             success, caption = False, ""
             if ok:
-                prep_ok = await asyncio.to_thread(
-                    self._prepare_vlm_frame, raw_shot_path, vlm_frame_path, self.camera_size
+                LOG.info("[vision] grab source=%s prep=vlm_frame", grab_source)
+                await self.emit(
+                    {
+                        "type": "camera_frame",
+                        "motion": 0,
+                        "timestamp": time.time(),
+                        "grab_source": grab_source,
+                    }
                 )
-                if prep_ok:
-                    caption = await self._board_vlm_with_web_tokens(
-                        vlm_frame_path, user_prompt, generation=generation
-                    )
-                    success = True
+                caption = await self._board_vlm_with_web_tokens(
+                    vlm_frame_path, user_prompt, generation=generation
+                )
+                success = True
         except Exception as exc:
             LOG.error("[vision] exception during vision turn: %s", exc)
             success, caption = False, ""
@@ -1230,7 +1453,12 @@ class Orchestrator:
         else:
             self._save_scene_memory(caption)
 
-        LOG.info("[vision] caption ready in %.2fs: %s", time.monotonic() - t0, caption)
+        LOG.info(
+            "[vision] caption ready in %.2fs (grab=%s): %s",
+            time.monotonic() - t0,
+            grab_source,
+            caption,
+        )
         await self.emit({"type": "vision_caption", "caption": caption, "generation": generation})
 
         if not self._tts_abort and generation == self._active_turn_id:

@@ -671,7 +671,7 @@
             </div>
             <div class="video-hud-overlay">
               <div class="hud-top">
-                <span class="hud-badge"><span class="status-dot active"></span> <span id="streamProtoBadge">RTSP / HTTP</span></span>
+                <span class="hud-badge"><span class="status-dot active"></span> <span id="streamProtoBadge">MediaMTX 缓存 JPEG</span></span>
                 <span id="motionHud" class="hud-badge" style="color: var(--accent-orange);">动态感知: 0.0</span>
               </div>
               <div class="hud-bottom">
@@ -820,6 +820,7 @@
     const waveStateText = document.getElementById("waveStateText");
     const videoStream = document.getElementById("videoStream");
     const videoPlaceholder = document.getElementById("videoPlaceholder");
+    const streamProtoBadge = document.getElementById("streamProtoBadge");
     const motionHud = document.getElementById("motionHud");
     const frameTimeHud = document.getElementById("frameTimeHud");
     const rtspUrlInput = document.getElementById("rtspUrlInput");
@@ -937,11 +938,11 @@
       }
     }
 
-    // Video Stream Image Refresh
     function refreshVideoFrame() {
       const ts = Date.now();
       videoStream.src = "/latest_frame.jpg?t=" + ts;
-      frameTimeHud.textContent = "最后刷新: " + new Date().toLocaleTimeString();
+      frameTimeHud.textContent = "MediaMTX 缓存 · " + new Date().toLocaleTimeString();
+      if (streamProtoBadge) streamProtoBadge.textContent = "MediaMTX 缓存 JPEG";
     }
 
     function onVideoLoaded() {
@@ -954,8 +955,8 @@
       videoStream.style.opacity = "0.2";
     }
 
-    // Auto-polling video frame every 2.5 seconds
-    setInterval(refreshVideoFrame, 2500);
+    setInterval(refreshVideoFrame, 1200);
+    refreshVideoFrame();
 
     // Dialogue Chat Helpers
     function appendUserMessage(text) {

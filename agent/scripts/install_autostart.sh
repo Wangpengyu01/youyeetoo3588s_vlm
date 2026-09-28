@@ -34,10 +34,38 @@ if [[ -f "${AGENT_ROOT}/systemd/r1-p4-eth.service" ]]; then
 fi
 systemctl daemon-reload
 
+# adb shell + systemctl restart often hangs (D-state). Only start if inactive; skip restart if already running.
+svc_start() {
+  local u="$1"
+  if systemctl is-active --quiet "$u" 2>/dev/null; then
+    echo "[install] $u already active — skip restart (adb-safe)"
+    return 0
+  fi
+  echo "[install] starting $u ..."
+  timeout 30 systemctl start "$u" || echo "[install] WARN: start $u timed out — reboot if stuck" >&2
+}
+
+P4_ROOT="${P4_ROOT:-/userdata/p4}"
 if systemctl list-unit-files r1-p4-eth.service >/dev/null 2>&1; then
   systemctl enable r1-p4-eth.service
   systemctl start r1-p4-eth.service || true
 fi
+# MediaMTX relay + frame cache (keeps mediamtx_latest.jpg fresh for vision / 重拍)
+if [[ -x "${P4_ROOT}/bin/mediamtx" ]] && [[ -f "${P4_ROOT}/systemd/r1-mediamtx.service" ]]; then
+  install -m 644 "${P4_ROOT}/systemd/r1-mediamtx.service" /etc/systemd/system/
+  chmod +x "${P4_ROOT}/scripts/mediamtx_gen_config.sh" 2>/dev/null || true
+  bash "${P4_ROOT}/scripts/mediamtx_gen_config.sh" 2>/dev/null || true
+  systemctl enable r1-mediamtx.service
+  svc_start r1-mediamtx.service
+fi
+if [[ -f "${AGENT_ROOT}/systemd/r1-mediamtx-frame.service" ]] && [[ -x "${P4_ROOT}/bin/mediamtx" ]]; then
+  chmod +x "${AGENT_ROOT}/scripts/mediamtx_rtsp_frame_daemon.sh" 2>/dev/null || true
+  sed -i 's/\r$//' "${AGENT_ROOT}/scripts/mediamtx_rtsp_frame_daemon.sh" 2>/dev/null || true
+  install -m 644 "${AGENT_ROOT}/systemd/r1-mediamtx-frame.service" /etc/systemd/system/
+  systemctl enable r1-mediamtx-frame.service
+  svc_start r1-mediamtx-frame.service
+fi
+systemctl daemon-reload
 USE_VLM=0
 if systemctl list-unit-files r1-vlm-daemon.service >/dev/null 2>&1; then
   if [[ -x "${AGENT_ROOT}/bin/vlm_daemon" ]] && [[ -s "${AGENT_ROOT}/bin/vlm_daemon" ]]; then
@@ -53,17 +81,6 @@ systemctl enable r1-orchestrator.service
 if systemctl list-unit-files r1-webui.service >/dev/null 2>&1; then
   systemctl enable r1-webui.service
 fi
-
-# adb shell + systemctl restart often hangs (D-state). Only start if inactive; skip restart if already running.
-svc_start() {
-  local u="$1"
-  if systemctl is-active --quiet "$u" 2>/dev/null; then
-    echo "[install] $u already active — skip restart (adb-safe)"
-    return 0
-  fi
-  echo "[install] starting $u ..."
-  timeout 30 systemctl start "$u" || echo "[install] WARN: start $u timed out — reboot if stuck" >&2
-}
 
 pkill -f 'xiaolan_cli serve' 2>/dev/null || true
 pkill -f 'orchestrator.main' 2>/dev/null || true
@@ -124,7 +141,7 @@ systemctl --no-pager status r1-webui.service --lines=3 2>/dev/null || true
 
 echo ""
 echo "[install] done"
-echo "  开机栈: r1-llm-daemon + r1-orchestrator (xiaolan_cli) + r1-webui (:8766)"
+echo "  开机栈: r1-mediamtx + r1-mediamtx-frame (缓存) + vlm/llm + orchestrator + webui (:8766)"
 echo "  PC 测试: adb forward tcp:8765 tcp:8765 && adb forward tcp:8766 tcp:8766"
 echo "  浏览器: http://127.0.0.1:8766  (API/WS :8765)"
 echo "  可选 HDMI 全屏: bash ${AGENT_ROOT}/scripts/open_agent_gui.sh"

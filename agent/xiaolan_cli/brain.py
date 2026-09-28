@@ -95,6 +95,8 @@ class XiaolanBrain:
         image_path: Path,
         prompt: str,
         on_token: Callable[[str], None] | None = None,
+        *,
+        max_new_tokens: int | None = None,
     ) -> str:
         """P5b: in-process see on vlm_daemon (no cooperative stop)."""
         import json
@@ -107,7 +109,7 @@ class XiaolanBrain:
             "id": req_id,
             "image_path": str(image_path),
             "prompt": prompt,
-            "max_new_tokens": self.max_new_tokens,
+            "max_new_tokens": int(max_new_tokens if max_new_tokens is not None else self.max_new_tokens),
         }
         parts: list[str] = []
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:

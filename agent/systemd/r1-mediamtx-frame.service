@@ -1,0 +1,23 @@
+[Unit]
+Description=MediaMTX local RTSP frame cache (mediamtx_latest.jpg for VLM)
+After=network-online.target r1-p4-eth.service r1-mediamtx.service
+Wants=network-online.target r1-p4-eth.service r1-mediamtx.service
+
+[Service]
+Type=simple
+Environment=AGENT_ROOT=/userdata/agent
+Environment=PYTHONPATH=/userdata/agent
+Environment=MEDIAMTX_RTSP=rtsp://127.0.0.1:8554/cam
+Environment=VLM_SIZE=448
+Environment=GRAB_TIMEOUT_SEC=15
+WorkingDirectory=/userdata/agent
+ExecStartPre=/bin/mkdir -p /userdata/agent/run /userdata/agent/logs
+ExecStartPre=/bin/bash -c 'sed -i "s/\\r$//" /userdata/agent/scripts/mediamtx_rtsp_frame_daemon.sh 2>/dev/null; chmod +x /userdata/agent/scripts/mediamtx_rtsp_frame_daemon.sh'
+ExecStart=/bin/bash /userdata/agent/scripts/mediamtx_rtsp_frame_daemon.sh
+Restart=on-failure
+RestartSec=2
+StandardOutput=append:/userdata/agent/logs/mediamtx_frame_daemon.log
+StandardError=append:/userdata/agent/logs/mediamtx_frame_daemon.log
+
+[Install]
+WantedBy=multi-user.target

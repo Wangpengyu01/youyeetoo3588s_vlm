@@ -16,7 +16,9 @@ if [ "${CONT}" != "1" ]; then
   fi
 fi
 
-PLAY=/tmp/play_16k.wav
+# Per-agent temp (root adb nohup vs systemd youyeetoo both need write access)
+PLAY="${AGENT_PLAY_16K:-${AGENT_ROOT:-/userdata/agent}/run/tts/play_16k.wav}"
+mkdir -p "$(dirname "${PLAY}")" 2>/dev/null || true
 CHANNELS="${PLAYBACK_CHANNELS:-1}"
 if [ "${PLAYBACK_MONO:-stereo}" = "stereo" ]; then
   CHANNELS=2

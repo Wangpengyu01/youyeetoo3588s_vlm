@@ -94,11 +94,20 @@ api:
 
 camera:
   enabled: true
-  # RTSP（默认与 /userdata/p4/config/rtsp.env 一致；WebUI 可 set_camera_url 覆盖）
+  # grab_backend: rtsp | mediamtx_rtsp (cache + local RTSP; no WHEP — preview uses daemon JPEG)
+  grab_backend: mediamtx_rtsp
+  mediamtx:
+    path: cam
+    rtsp_url: "rtsp://127.0.0.1:8554/cam"
+    whep_url: "http://127.0.0.1:8889/cam/whep"
+    latest_frame: /userdata/agent/run/mediamtx_latest.jpg
+    cache_max_age_sec: 0.8
+  # 直连摄像头 RTSP（grab_backend=rtsp 时使用；WebUI 可 set_camera_url 覆盖）
   url: "rtsp://192.168.2.169:554/stream_2"
   rtsp_transport: "tcp"
-  timeout: 22.0
+  timeout: 12.0
   size: 448
+  see_max_new_tokens: 96
   prompt: "用一句话简短描述画面中的核心物品和场景。"
   # P5b: see/chat via vlm_daemon socket (inference.backend). Legacy: run_board_vlm.sh
   vlm_cmd: "/userdata/agent/scripts/run_board_vlm.sh"

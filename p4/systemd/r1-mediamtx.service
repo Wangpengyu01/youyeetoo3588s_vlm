@@ -1,0 +1,17 @@
+[Unit]
+Description=MediaMTX camera relay (RTSP upstream -> localhost :8554 / WebRTC :8889)
+After=network-online.target r1-p4-eth.service
+Wants=network-online.target r1-p4-eth.service
+
+[Service]
+Type=simple
+WorkingDirectory=/userdata/p4
+ExecStartPre=/bin/bash /userdata/p4/scripts/mediamtx_gen_config.sh
+ExecStart=/userdata/p4/bin/mediamtx /userdata/p4/config/mediamtx.yml
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/userdata/p4/logs/mediamtx.log
+StandardError=append:/userdata/p4/logs/mediamtx.log
+
+[Install]
+WantedBy=multi-user.target
