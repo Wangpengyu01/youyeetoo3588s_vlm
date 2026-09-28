@@ -83,10 +83,10 @@ class SysfsGpioPin:
                 pass
 
 
-def perform_safe_shutdown(test_mode: bool = False, agent_root: str = "/userdata/agent"):
-    """Executes the safe shutdown sequence."""
+def perform_safe_shutdown(test_mode: bool = False, agent_root: str = "/userdata/agent", action: str = "halt"):
+    """Executes the safe shutdown/halt sequence."""
     logger.info("==================================================")
-    logger.info(">>> INITIATING SAFE SYSTEM SHUTDOWN SEQUENCE <<<")
+    logger.info(f">>> INITIATING SAFE SYSTEM {action.upper()} SEQUENCE (MODE A) <<<")
     logger.info("==================================================")
 
     stop_script = os.path.join(agent_root, "scripts", "quickstart_all.sh")
@@ -110,21 +110,21 @@ def perform_safe_shutdown(test_mode: bool = False, agent_root: str = "/userdata/
         except Exception as e:
             logger.warning(f"Sync error: {e}")
 
-    logger.info("[3/3] Requesting system poweroff (systemctl poweroff)...")
+    logger.info(f"[3/3] Requesting system {action} (systemctl {action})...")
     if test_mode:
-        logger.info("[TEST MODE] Simulation complete! System poweroff skipped.")
+        logger.info(f"[TEST MODE] Simulation complete! System {action} skipped.")
         return
 
     try:
-        subprocess.run(["systemctl", "poweroff"], check=False)
+        subprocess.run(["systemctl", action], check=False)
     except Exception:
-        # Fallback to poweroff command
-        os.system("poweroff -f")
+        # Fallback to halt/poweroff command
+        os.system(f"{action} -f")
 
 
 def run_monitor(pin_num: int, hold_time: float, debounce_time: float,
                 poll_interval: float, test_mode: bool, active_low: bool,
-                agent_root: str):
+                agent_root: str, action: str = "halt"):
     """Main loop monitoring the configured GPIO pin."""
     gpio = SysfsGpioPin(pin_num, active_low=active_low)
     try:
@@ -146,7 +146,7 @@ def run_monitor(pin_num: int, hold_time: float, debounce_time: float,
     initial_val = gpio.read_raw()
     logger.info(f"GPIO Poweroff Monitor started on GPIO {pin_num}.")
     logger.info(f"Config: hold_time={hold_time}s, debounce={debounce_time}s, "
-                f"active_low={active_low}, test_mode={test_mode}")
+                f"active_low={active_low}, test_mode={test_mode}, action={action}")
     logger.info(f"Current initial raw level on GPIO {pin_num}: {initial_val} "
                 f"({'IDLE' if not gpio.is_pressed() else 'PRESSED'})")
 
@@ -164,13 +164,19 @@ def run_monitor(pin_num: int, hold_time: float, debounce_time: float,
                     time.sleep(debounce_time)
                     if gpio.is_pressed():
                         press_start_time = now
-                        logger.info(f"[BUTTON] Pressed detected on GPIO {pin_num}, hold for {hold_time}s to poweroff...")
+                        logger.info(f"[BUTTON] Pressed detected on GPIO {pin_num}, hold for {hold_time}s to {action}...")
                 else:
                     elapsed = now - press_start_time
                     if elapsed >= hold_time and not triggered:
                         triggered = True
                         logger.info(f"[BUTTON] Held for {elapsed:.2f}s >= threshold {hold_time}s!")
-                        perform_safe_shutdown(test_mode=test_mode, agent_root=agent_root)
+                        # Wait for user to release the button first
+                        logger.info("Waiting for button release before triggering shutdown...")
+                        rel_start = time.time()
+                        while gpio.is_pressed() and (time.time() - rel_start < 5.0):
+                            time.sleep(0.05)
+                        logger.info("Button released.")
+                        perform_safe_shutdown(test_mode=test_mode, agent_root=agent_root, action=action)
                         if test_mode:
                             logger.info("[TEST MODE] Resetting trigger for continued testing.")
                             triggered = False
@@ -269,6 +275,8 @@ def main():
                         help="Debounce duration in seconds (default: 0.1)")
     parser.add_argument("--poll-interval", type=float, default=0.05,
                         help="Poll interval in seconds (default: 0.05)")
+    parser.add_argument("--action", type=str, default="halt", choices=["halt", "poweroff"],
+                        help="Shutdown action to execute: 'halt' (Mode A, stops and stays off) or 'poweroff' (default: halt)")
     parser.add_argument("--test", action="store_true",
                         help="Test mode: simulate shutdown without actually turning off")
     parser.add_argument("--scan", action="store_true",
@@ -291,6 +299,7 @@ def main():
             test_mode=args.test,
             active_low=not args.active_high,
             agent_root=args.agent_root,
+            action=args.action,
         )
 
 

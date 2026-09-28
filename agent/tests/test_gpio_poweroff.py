@@ -44,12 +44,18 @@ class TestGpioPoweroff(unittest.TestCase):
     @patch("os.system")
     @patch("os.path.isfile", return_value=True)
     def test_safe_shutdown_production_mode(self, mock_isfile, mock_system, mock_subproc):
-        gpm.perform_safe_shutdown(test_mode=False, agent_root="/userdata/agent")
-        # Ensure stop script and poweroff were invoked
+        # Default action is halt (Mode A)
+        gpm.perform_safe_shutdown(test_mode=False, agent_root="/userdata/agent", action="halt")
         calls = [c[0][0] for c in mock_subproc.call_args_list]
         self.assertIn(["bash", os.path.join("/userdata/agent", "scripts", "quickstart_all.sh"), "stop"], calls)
-        self.assertIn(["systemctl", "poweroff"], calls)
+        self.assertIn(["systemctl", "halt"], calls)
         mock_system.assert_called_with("sync; sync")
+
+        # Explicit action poweroff
+        mock_subproc.reset_mock()
+        gpm.perform_safe_shutdown(test_mode=False, agent_root="/userdata/agent", action="poweroff")
+        calls_pwr = [c[0][0] for c in mock_subproc.call_args_list]
+        self.assertIn(["systemctl", "poweroff"], calls_pwr)
 
     def test_candidate_pins_configuration(self):
         # Ensure GPIO1_A7 (pin 39) is among candidate pins
