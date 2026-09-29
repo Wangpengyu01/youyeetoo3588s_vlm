@@ -677,9 +677,10 @@
             </div>
           </div>
           <div class="video-controls">
-            <input id="rtspUrlInput" class="input-stream-url" type="text" placeholder="输入 RTSP 流地址 (例如: rtsp://192.168.1.100:554/live)" />
+            <input id="rtspUrlInput" class="input-stream-url" type="text" placeholder="输入 RTSP 流或视频流地址 (例如: http://10.42.0.23:8080/video)" />
             <button id="saveRtspBtn" class="btn btn-secondary">切换流</button>
-            <button id="snapBtn" class="btn btn-primary">📷 拍照识别</button>
+            <button id="toggleStreamModeBtn" class="btn btn-secondary" title="在 30FPS 实时视频流与低带宽抽帧模式间切换">🔴 30FPS实时流</button>
+            <button id="snapBtn" class="btn btn-primary">⚡ 实时流识别</button>
           </div>
         </div>
       </section>
@@ -930,11 +931,73 @@
       }
     }
 
-    // Video Stream Image Refresh
+    // Video Stream Image Refresh & Live Streaming
+    let liveStreamMode = false;
+    let pollTimer = null;
+    const toggleStreamModeBtn = document.getElementById("toggleStreamModeBtn");
+
+    function enableLiveStream(streamUrl) {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      liveStreamMode = true;
+      videoStream.src = streamUrl;
+      frameTimeHud.textContent = "实时视频流 (30 FPS 动态)";
+      const fpsBadge = document.getElementById("videoFps");
+      if (fpsBadge) {
+        fpsBadge.textContent = "30 FPS 实时流";
+        fpsBadge.style.color = "var(--accent-green)";
+        fpsBadge.style.borderColor = "var(--accent-green)";
+      }
+      if (toggleStreamModeBtn) {
+        toggleStreamModeBtn.textContent = "📷 切换为抽帧模式";
+        toggleStreamModeBtn.classList.add("btn-primary");
+        toggleStreamModeBtn.classList.remove("btn-secondary");
+      }
+    }
+
+    function enableSnapshotPolling() {
+      liveStreamMode = false;
+      refreshVideoFrame();
+      if (!pollTimer) {
+        pollTimer = setInterval(refreshVideoFrame, 2000);
+      }
+      const fpsBadge = document.getElementById("videoFps");
+      if (fpsBadge) {
+        fpsBadge.textContent = "抽帧监测 0.5 FPS";
+        fpsBadge.style.color = "";
+        fpsBadge.style.borderColor = "";
+      }
+      if (toggleStreamModeBtn) {
+        toggleStreamModeBtn.textContent = "🔴 30FPS实时流";
+        toggleStreamModeBtn.classList.remove("btn-primary");
+        toggleStreamModeBtn.classList.add("btn-secondary");
+      }
+    }
+
+    function toggleStreamMode() {
+      if (!liveStreamMode) {
+        let streamUrl = rtspUrlInput.value.trim();
+        if (streamUrl.endsWith("/shot.jpg")) {
+          streamUrl = streamUrl.replace(/\/shot\.jpg$/, "/video");
+        }
+        if (streamUrl.startsWith("http://") || streamUrl.startsWith("https://")) {
+          enableLiveStream(streamUrl);
+        } else {
+          // If not direct HTTP, try local proxy or keep polling
+          enableLiveStream("/latest_frame.jpg");
+        }
+      } else {
+        enableSnapshotPolling();
+      }
+    }
+
     function refreshVideoFrame() {
+      if (liveStreamMode) return;
       const ts = Date.now();
       videoStream.src = "/latest_frame.jpg?t=" + ts;
-      frameTimeHud.textContent = "最后刷新: " + new Date().toLocaleTimeString();
+      frameTimeHud.textContent = "最后更新: " + new Date().toLocaleTimeString();
     }
 
     function onVideoLoaded() {
@@ -943,12 +1006,18 @@
     }
 
     function onVideoError() {
-      videoPlaceholder.style.display = "flex";
-      videoStream.style.opacity = "0.2";
+      if (liveStreamMode) {
+        // Fallback to snapshot polling if live stream dropped
+        console.warn("Live video stream interrupted, falling back to snapshot buffer");
+        enableSnapshotPolling();
+      } else {
+        videoPlaceholder.style.display = "flex";
+        videoStream.style.opacity = "0.2";
+      }
     }
 
-    // Auto-polling video frame every 2.5 seconds
-    setInterval(refreshVideoFrame, 2500);
+    // Auto-polling video frame
+    pollTimer = setInterval(refreshVideoFrame, 2000);
 
     // Dialogue Chat Helpers
     function appendUserMessage(text) {
@@ -1159,6 +1228,10 @@
         if (q) sendChatMessage(q);
       });
     });
+
+    if (toggleStreamModeBtn) {
+      toggleStreamModeBtn.addEventListener("click", toggleStreamMode);
+    }
 
     snapBtn.addEventListener("click", () => {
       sendWs({ type: "snap", prompt: "桌面上有什么？" });

@@ -736,14 +736,28 @@ class Orchestrator:
             else:
                 target_url = url.rstrip("/")
                 if not target_url.startswith("file://"):
-                    if not target_url.endswith(".jpg") and not target_url.endswith(".jpeg"):
-                        target_url += "/shot.jpg"
+                    if not (target_url.endswith(".jpg") or target_url.endswith(".jpeg") or target_url.endswith("/video") or target_url.endswith("/shot.jpg")):
+                        target_url += "/video" if ":8080" in target_url else "/shot.jpg"
                 req = urllib.request.Request(
                     target_url,
                     headers={"User-Agent": "XiaoLan-CameraClient/1.0"},
                 )
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    data = resp.read()
+                if target_url.endswith("/video"):
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        buf = bytearray()
+                        while len(buf) < 1500000:
+                            chunk = resp.read(4096)
+                            if not chunk:
+                                break
+                            buf.extend(chunk)
+                            a = buf.find(b"\xff\xd8")
+                            b = buf.find(b"\xff\xd9", a + 2) if a != -1 else -1
+                            if a != -1 and b != -1:
+                                data = bytes(buf[a : b + 2])
+                                break
+                else:
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        data = resp.read()
                 if data:
                     save_path.parent.mkdir(parents=True, exist_ok=True)
                     save_path.write_bytes(data)
