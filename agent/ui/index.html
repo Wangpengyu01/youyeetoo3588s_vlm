@@ -660,7 +660,7 @@
         </div>
         <div class="panel-body">
           <div class="video-viewport">
-            <img id="videoStream" class="video-img" src="/latest_frame.jpg" alt="实时画面" onerror="onVideoError()" onload="onVideoLoaded()" />
+            <img id="videoStream" class="video-img" src="/video_feed" alt="实时视频流 (30 FPS)" onerror="onVideoError()" onload="onVideoLoaded()" />
             <div id="videoPlaceholder" class="video-placeholder" style="display: none;">
               <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
               <span>等待视频流或摄像头抓帧…</span>
@@ -1016,8 +1016,8 @@
       }
     }
 
-    // Auto-polling video frame
-    pollTimer = setInterval(refreshVideoFrame, 2000);
+    // Initialize with direct 30FPS live video streaming
+    enableLiveStream("/video_feed");
 
     // Dialogue Chat Helpers
     function appendUserMessage(text) {
