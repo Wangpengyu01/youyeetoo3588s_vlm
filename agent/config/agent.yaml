@@ -93,7 +93,7 @@ camera:
   # 1) RTSP 视频流（支持安防摄像头/NVR，支持 TCP 与 RK3588 MPP 硬件加速）：
   # url: "rtsp://192.168.2.169:554/stream_2"
   # 2) HTTP 快照流（手机 IP Webcam 或 Web 推流）：
-  url: "http://10.0.0.159:8080/shot.jpg"
+  url: "http://10.42.0.23:8080/shot.jpg"
   rtsp_transport: "tcp"
   timeout: 2.0
   size: 448
