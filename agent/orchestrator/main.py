@@ -756,8 +756,62 @@ class Orchestrator:
             self._sync_ui_preview_frame(data)
             return True
         except Exception as exc:
+            # Hotspot auto-discovery fallback: if current URL fails, check if phone connected to hotspot
+            if not url.startswith("rtsp://") and not os.path.exists(url):
+                discovered_url = self._discover_hotspot_camera_url()
+                if discovered_url and discovered_url != url:
+                    try:
+                        req = urllib.request.Request(
+                            discovered_url,
+                            headers={"User-Agent": "XiaoLan-CameraClient/1.0"},
+                        )
+                        with urllib.request.urlopen(req, timeout=timeout) as resp:
+                            cand_data = resp.read()
+                        if cand_data and len(cand_data) > 1000:
+                            save_path.parent.mkdir(parents=True, exist_ok=True)
+                            save_path.write_bytes(cand_data)
+                            self._latest_camera_bytes = cand_data
+                            self._latest_camera_time = now
+                            self._sync_ui_preview_frame(cand_data)
+                            LOG.info("[camera] auto-switched camera URL to hotspot phone: %s", discovered_url)
+                            self.camera_url = discovered_url
+                            return True
+                    except Exception:
+                        pass
             LOG.warning("[camera] grab frame from %s failed: %s", url, exc)
             return False
+
+    def _discover_hotspot_camera_url(self) -> str | None:
+        try:
+            candidates: list[str] = []
+            if os.path.isfile("/proc/net/arp"):
+                with open("/proc/net/arp", "r", encoding="utf-8") as f:
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) >= 6 and "wl" in parts[5]:
+                            ip = parts[0]
+                            if ip.startswith("10.42.0.") and ip not in candidates:
+                                candidates.append(ip)
+            for def_ip in ("10.42.0.10", "10.42.0.2", "10.42.0.3"):
+                if def_ip not in candidates:
+                    candidates.append(def_ip)
+
+            for ip in candidates:
+                cand_url = f"http://{ip}:8080/shot.jpg"
+                try:
+                    req = urllib.request.Request(
+                        cand_url,
+                        headers={"User-Agent": "XiaoLan-CameraClient/1.0"},
+                    )
+                    with urllib.request.urlopen(req, timeout=0.6) as resp:
+                        hdr = resp.getheader("Content-Type", "")
+                        if "image" in hdr or resp.status == 200:
+                            return cand_url
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
 
     def _prepare_vlm_frame(self, src_path: Path, dst_path: Path, size: int = 448) -> bool:
         try:
